@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"><title>VEIL-BLADE: PERFECTED KINETIC</title>
+    <style>
+        body { margin: 0; background: #050508; overflow: hidden; font-family: 'Inter', sans-serif; color: #fff; user-select: none; }
+        #ui { position: absolute; top: 20px; left: 20px; z-index: 10; pointer-events: none; }
+        .bar-container { width: 220px; height: 10px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); margin: 5px 0; }
+        #player-hp-fill { height: 100%; width: 100%; background: #ff5b6e; box-shadow: 0 0 15px rgba(255, 80, 110, 0.8); }
+        #snap-fill { height: 100%; width: 0%; background: #3cf5ff; box-shadow: 0 0 15px #0ff; }
+        #damage-tint { position: absolute; inset: 0; background: rgba(255, 70, 70, 0.55); opacity: 0; pointer-events: none; z-index: 6; }
+        #attack1-debug { position: absolute; top: 20px; right: 20px; z-index: 14; min-width: 250px; padding: 10px 12px; background: rgba(0,0,0,0.78); border: 1px solid rgba(255,255,255,0.18); font: 12px/1.35 monospace; color: #fff; white-space: pre; pointer-events: none; display: none; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <b>VEIL-BLADE: KINETIC</b>
+        <div id="combo-tag" style="font-size:24px; color:#0ff;">READY</div>
+        <div>HP <div class="bar-container"><div id="player-hp-fill"></div></div></div>
+        <div>METER <div class="bar-container"><div id="snap-fill"></div></div></div>
+    </div>
+    <div id="damage-tint"></div>
+    <div id="attack1-debug"></div>
+
+    <script type="importmap">{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }</script>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
