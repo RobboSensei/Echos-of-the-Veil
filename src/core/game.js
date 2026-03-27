@@ -3,7 +3,7 @@ import { ATTACK1_DEBUG_TOGGLE_KEY } from '../config/debugFlags.js';
 import { renderAttack1DebugOverlay } from '../debug/debugOverlay.js';
 import { createInput } from '../input/input.js';
 import { createPlayer } from '../player/createPlayer.js';
-import { applySceneFog, setupEnvironment } from '../scene/environment.js';
+import { applySceneFog, setupEnvironment, updateEnvironment } from '../scene/environment.js';
 import { setupLighting } from '../scene/lighting.js';
 
 export function createGame({ runtime, dom }) {
@@ -104,7 +104,7 @@ export function createGame({ runtime, dom }) {
     const enemyMat = new THREE.MeshStandardMaterial({
         color: 0xff4fd8,
         emissive: 0x8a134f,
-        emissiveIntensity: 1.1,
+        emissiveIntensity: 0.42,
         roughness: 0.35,
         metalness: 0.15,
         transparent: true
@@ -116,7 +116,7 @@ export function createGame({ runtime, dom }) {
 
     const enemyHalo = new THREE.Mesh(
         new THREE.TorusGeometry(0.9, 0.08, 8, 24),
-        new THREE.MeshBasicMaterial({ color: 0xff8dea, transparent: true, opacity: 0.5 })
+        new THREE.MeshBasicMaterial({ color: 0xff8dea, transparent: true, opacity: 0.18 })
     );
     enemyHalo.rotation.x = Math.PI / 2;
     enemyHalo.position.y = 0.95;
@@ -969,48 +969,48 @@ export function createGame({ runtime, dom }) {
         enemyHalo.rotation.z += dt * 1.6;
 
         let visualColor = enemyBaseColor;
-        let emissiveIntensity = 1.15;
-        let haloOpacity = 0.5;
+        let emissiveIntensity = 0.48;
+        let haloOpacity = 0.18;
         let scale = 1;
         let opacity = 1;
 
         if (enemy.state === 'telegraph') {
             const pulse = 0.5 + Math.sin((0.55 - enemy.telegraphT) * 22) * 0.5;
             visualColor = enemyTelegraphColor;
-            emissiveIntensity = 1.8 + pulse * 1.4;
-            haloOpacity = 0.55 + pulse * 0.35;
+            emissiveIntensity = 0.78 + pulse * 0.48;
+            haloOpacity = 0.24 + pulse * 0.16;
             scale = 1 + pulse * 0.16;
         } else if (enemy.state === 'lunge') {
             visualColor = enemyLungeColor;
-            emissiveIntensity = 2.1;
-            haloOpacity = 0.72;
+            emissiveIntensity = 1.05;
+            haloOpacity = 0.34;
             scale = 1.08;
         } else if (enemy.state === 'recovery') {
-            emissiveIntensity = 0.8;
-            haloOpacity = 0.32;
+            emissiveIntensity = 0.34;
+            haloOpacity = 0.12;
             scale = 0.96;
         } else if (enemy.state === 'hitstun') {
-            emissiveIntensity = 0.7;
-            haloOpacity = 0.25;
+            emissiveIntensity = 0.3;
+            haloOpacity = 0.1;
             scale = 0.92;
         } else if (enemy.state === 'dead') {
             const fade = THREE.MathUtils.clamp(enemy.deadT / 0.28, 0, 1);
             visualColor = enemyHitColor;
-            emissiveIntensity = 2.2;
-            haloOpacity = fade * 0.7;
+            emissiveIntensity = 1.05;
+            haloOpacity = fade * 0.3;
             scale = 1.05 + (1 - fade) * 0.45;
             opacity = fade;
         }
 
         if (enemy.hitFlashT > 0) {
             visualColor = enemyHitColor;
-            emissiveIntensity += 1.2;
-            haloOpacity = 0.85;
+            emissiveIntensity += 0.45;
+            haloOpacity = 0.36;
             scale += 0.08;
         }
 
         enemyMat.color.copy(visualColor);
-        enemyMat.emissive.copy(visualColor).multiplyScalar(0.45);
+        enemyMat.emissive.copy(visualColor).multiplyScalar(0.18);
         enemyMat.emissiveIntensity = emissiveIntensity;
         enemyMat.opacity = opacity;
         enemyCore.scale.setScalar(scale);
@@ -1055,6 +1055,7 @@ export function createGame({ runtime, dom }) {
     function frame() {
         const rawDt = clock.getDelta();
         const dt = hitStopT > 0 ? 0 : Math.min(rawDt, 0.033);
+        updateEnvironment(dt);
         if (hitStopT > 0) hitStopT = Math.max(0, hitStopT - rawDt);
         if (playerHitStunT > 0) playerHitStunT = Math.max(0, playerHitStunT - rawDt);
         if (rollCooldownT > 0) rollCooldownT = Math.max(0, rollCooldownT - rawDt);
