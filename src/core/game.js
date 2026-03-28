@@ -44,6 +44,13 @@ import {
     setAttack2WeaponTargets
 } from '../combat/attack2.js';
 import { createPlayer } from '../player/createPlayer.js';
+import {
+    getAttackIntent,
+    getFlatCameraForward,
+    getWeaponParentLabel,
+    rotateModelToward,
+    validateAnatomicalCombatRig
+} from '../player/playerProcedural.js';
 import { applySceneFog, setupEnvironment, updateEnvironment } from '../scene/environment.js';
 import { setupLighting } from '../scene/lighting.js';
 import { easeInOutCubic } from '../utils/easing.js';
@@ -238,13 +245,30 @@ export function createGame({ runtime, dom }) {
         stepVals: '',
         braceVals: ''
     };
+    const playerProceduralContext = {
+        camera,
+        cameraForward,
+        moveAxis,
+        playerModel,
+        attackIntent,
+        lastMoveWorld,
+        weaponPivot,
+        anatomicalLeftHand,
+        anatomicalRightHand,
+        anatomicalLeftFoot,
+        anatomicalRightFoot,
+        leftHand,
+        rightHand,
+        leftFoot,
+        rightFoot,
+        debug: { attack1DebugValidated: false }
+    };
     const attack1DebugContext = {
         attack1DebugState,
         runtimeRoleLabels: ATTACK_1_RUNTIME_ROLE_LABELS,
-        getWeaponParentLabel
+        getWeaponParentLabel: () => getWeaponParentLabel(playerProceduralContext)
     };
     let attack1DebugEnabled = false;
-    let attack1DebugValidated = false;
     const enemyKnockback = new THREE.Vector3();
     const playerKnockback = new THREE.Vector3();
     const rollDirection = new THREE.Vector3(0, 0, 1);
@@ -254,7 +278,7 @@ export function createGame({ runtime, dom }) {
         onKeyDown: e => {
             if (e.code === ATTACK1_DEBUG_TOGGLE_KEY && !e.repeat) {
                 attack1DebugEnabled = !attack1DebugEnabled;
-                if (attack1DebugEnabled) validateAnatomicalCombatRig();
+                if (attack1DebugEnabled) validateAnatomicalCombatRig(playerProceduralContext);
                 console.info(`[ATTACK 1 DEBUG] ${attack1DebugEnabled ? 'enabled' : 'disabled'} (${ATTACK1_DEBUG_TOGGLE_KEY})`);
             }
         }
@@ -327,53 +351,6 @@ export function createGame({ runtime, dom }) {
         weaponPivot.rotation.set(0, 0, 0);
     }
 
-    function getFlatCameraForward() {
-        camera.getWorldDirection(cameraForward);
-        cameraForward.y = 0;
-        if (cameraForward.lengthSq() < 0.0001) cameraForward.set(0, 0, -1);
-        return cameraForward.normalize();
-    }
-
-    function getAttackIntent(worldMove) {
-        if (worldMove.lengthSq() > 0.01) {
-            lastMoveWorld.copy(worldMove).normalize();
-            attackIntent.copy(lastMoveWorld);
-        } else if (lastMoveWorld.lengthSq() > 0.01) {
-            attackIntent.copy(lastMoveWorld);
-        } else {
-            attackIntent.set(0, 0, 1).applyAxisAngle(moveAxis, playerModel.rotation.y).normalize();
-        }
-        return attackIntent;
-    }
-
-    function rotateModelToward(direction, blend) {
-        const targetYaw = Math.atan2(direction.x, direction.z);
-        const delta = THREE.MathUtils.euclideanModulo(targetYaw - playerModel.rotation.y + Math.PI, Math.PI * 2) - Math.PI;
-        playerModel.rotation.y += delta * blend;
-    }
-
-    function getWeaponParentLabel() {
-        if (weaponPivot.parent === anatomicalLeftHand) return 'anatomicalLeftHand';
-        if (weaponPivot.parent === anatomicalRightHand) return 'anatomicalRightHand';
-        return 'other';
-    }
-
-    function validateAnatomicalCombatRig() {
-        if (attack1DebugValidated) return;
-        attack1DebugValidated = true;
-        if (
-            anatomicalLeftHand !== rightHand ||
-            anatomicalRightHand !== leftHand ||
-            anatomicalLeftFoot !== rightFoot ||
-            anatomicalRightFoot !== leftFoot
-        ) {
-            console.warn('[ATTACK 1 DEBUG] Anatomical mapping no longer matches the known inverted raw rig.');
-        }
-        if (weaponPivot.parent !== anatomicalLeftHand) {
-            console.warn(`[ATTACK 1 DEBUG] Weapon parent drifted from anatomicalLeftHand. Current parent: ${getWeaponParentLabel()}`);
-        }
-    }
-
     function startAttack(type, worldMove, { fromBridge = false, preserveIntent = false } = {}) {
         if (!fromBridge && (isAttacking || isRolling)) return false;
         resetPendingAttack2();
@@ -399,10 +376,10 @@ export function createGame({ runtime, dom }) {
         queuedAttackT = 0;
         if (type === 'attack1' && attack1DebugEnabled) {
             console.info(
-                `[ATTACK 1 DEBUG] strikeHand:${ATTACK_1_RUNTIME_ROLE_LABELS.strikeHand} counterHand:${ATTACK_1_RUNTIME_ROLE_LABELS.counterHand} stepFoot:${ATTACK_1_RUNTIME_ROLE_LABELS.stepFoot} braceFoot:${ATTACK_1_RUNTIME_ROLE_LABELS.braceFoot} weaponParent:${getWeaponParentLabel()}`
+                `[ATTACK 1 DEBUG] strikeHand:${ATTACK_1_RUNTIME_ROLE_LABELS.strikeHand} counterHand:${ATTACK_1_RUNTIME_ROLE_LABELS.counterHand} stepFoot:${ATTACK_1_RUNTIME_ROLE_LABELS.stepFoot} braceFoot:${ATTACK_1_RUNTIME_ROLE_LABELS.braceFoot} weaponParent:${getWeaponParentLabel(playerProceduralContext)}`
             );
         }
-        if (!preserveIntent) getAttackIntent(worldMove);
+        if (!preserveIntent) getAttackIntent(playerProceduralContext, worldMove);
         attackEntryWeaponPos.copy(weaponPivot.position);
         attackEntryWeaponRot.set(weaponPivot.rotation.x, weaponPivot.rotation.y, weaponPivot.rotation.z);
         trailMat.opacity = Math.max(trailMat.opacity, type === 'attack1' ? ATTACK_1_CONFIG.trailOpacity : ATTACK_2_CONFIG.trailOpacity);
@@ -443,7 +420,7 @@ export function createGame({ runtime, dom }) {
         rollCooldownT = ROLL_COOLDOWN;
         getRollDirection(worldMove);
         lastMoveWorld.copy(rollDirection);
-        rotateModelToward(rollDirection, 1);
+        rotateModelToward(playerProceduralContext, rollDirection, 1);
         trailMat.opacity = Math.max(trailMat.opacity, 0.7);
         return true;
     }
@@ -789,7 +766,7 @@ export function createGame({ runtime, dom }) {
             const rollProgress = 1 - (rollT / ROLL_DURATION);
             const rollSpeed = 30 * Math.pow(1 - rollProgress, 2) + 4;
             playerPivot.position.addScaledVector(rollDirection, rollSpeed * dt);
-            rotateModelToward(rollDirection, 0.45);
+            rotateModelToward(playerProceduralContext, rollDirection, 0.45);
             playerModel.rotation.x = 0;
             playerModel.position.y = 0;
             playerModel.scale.setScalar(1);
@@ -806,14 +783,14 @@ export function createGame({ runtime, dom }) {
             playerModel.rotation.x = 0;
             playerModel.position.y = 0;
             playerModel.scale.setScalar(1);
-            rotateModelToward(getAttackIntent(worldMove), 0.3);
+            rotateModelToward(playerProceduralContext, getAttackIntent(playerProceduralContext, worldMove), 0.3);
         } else if (worldMove.lengthSq() > 0.01 && !isAttacking && playerHitStunT <= 0 && playerHp > 0) {
             playerModel.rotation.x = 0;
             playerModel.position.y = 0;
             playerModel.scale.setScalar(1);
             lastMoveWorld.copy(worldMove).normalize();
             playerPivot.position.add(worldMove.clone().multiplyScalar(16 * dt));
-            rotateModelToward(lastMoveWorld, 0.35);
+            rotateModelToward(playerProceduralContext, lastMoveWorld, 0.35);
         } else if (!isAttacking) {
             playerModel.rotation.x = 0;
             playerModel.position.y = 0;
