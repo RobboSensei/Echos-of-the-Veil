@@ -152,9 +152,14 @@ export function createGame({ runtime, dom }) {
     camera.lookAt(lookTarget);
 
     // --- COMBAT LOGIC ---
-    let comboStep = 0, isAttacking = false, attackT = 0, comboWindow = 0, orbitY = 0;
+    let isAttacking = false, attackT = 0, orbitY = 0;
+    let currentAttackType = null;
+    let bufferedAttackType = null;
+    let queuedAttackType = null;
     let attackBufferT = 0;
-    let attackHeld = false;
+    let queuedAttackT = 0;
+    let attack1Held = false;
+    let attack2Held = false;
     let rollHeld = false;
     let attackId = 0;
     let snapMeter = 0;
@@ -165,6 +170,15 @@ export function createGame({ runtime, dom }) {
     let impactBurstT = 0;
     let playerHp = 5;
     let previousAttackT = 0;
+    let attackHitConnected = false;
+    let attackStartedFromBridge = false;
+    let attackEntryCarry = 0;
+    let attackBridgeBlendT = 0;
+    let pendingAttack2 = false;
+    let pendingAttack2HoldT = 0;
+    let attack2ChargeT = 0;
+    let attack2IsCharging = false;
+    let attack2Released = false;
     let isRolling = false;
     let rollT = 0;
     let rollCooldownT = 0;
@@ -176,11 +190,50 @@ export function createGame({ runtime, dom }) {
     const attackIntent = new THREE.Vector3(0, 0, -1);
     const lastMoveWorld = new THREE.Vector3(0, 0, 0);
     const ATTACK_BUFFER = 0.18;
-    const ATTACK_1_CONFIG = { activeStart: 0.36, activeEnd: 0.54, hitRange: 1.6 };
+    const ATTACK_1_CONFIG = {
+        activeStart: 0.36,
+        activeEnd: 0.54,
+        hitRange: 1.6,
+        damage: 1.5,
+        hitStun: 0.24,
+        knockback: 6.5,
+        trailOpacity: 0.58
+    };
+    const ATTACK_2_CONFIG = {
+        holdThreshold: 0.15,
+        maxChargeTime: 0.24,
+        chargeAnchorTime: 0.12,
+        playbackRate: 1.72,
+        chargeStartupBonus: 0.1,
+        startupTime: 0.18,
+        activeTime: 0.14,
+        recoveryTime: 0.34,
+        recoveryBonus: 0.22,
+        displayStartupEnd: 0.34,
+        displayActiveEnd: 0.56,
+        bridgeWindowLead: 0.03,
+        bridgeWindowLag: 0.05,
+        tapHitRange: 1.18,
+        holdHitRangeBonus: 0.14,
+        minForward: 0.58,
+        maxLateral: 0.8,
+        verticalRange: 0.95,
+        tapDamage: 1.0,
+        maxDamageScale: 1.55,
+        tapHitStun: 0.13,
+        holdHitStunBonus: 0.08,
+        tapKnockback: 3.0,
+        holdKnockbackBonus: 1.9,
+        tapCarryPeak: 0.11,
+        holdCarryBonus: 0.19,
+        trailOpacity: 0.36
+    };
     const ATTACK_1_WINDUP_END = 0.35;
     const ATTACK_1_STRIKE_END = 0.5;
     const ATTACK_1_END_T = 0.9;
     const ATTACK_1_CARRY_PEAK = 0.22;
+    const ATTACK_1_BRIDGE_BLEND_TIME = 0.09;
+    const ATTACK_1_BRIDGE_START_PROGRESS = 0.14;
     const PLAYER_MAX_HP = 5;
     const ROLL_DURATION = 0.36;
     const ROLL_COOLDOWN = 0.7;
@@ -207,6 +260,10 @@ export function createGame({ runtime, dom }) {
     const attackTargetWeaponPos = new THREE.Vector3();
     const attack1WeaponReturnPos = new THREE.Vector3();
     const attack1WeaponReturnRot = new THREE.Vector3();
+    const attack2WeaponReturnPos = new THREE.Vector3();
+    const attack2WeaponReturnRot = new THREE.Vector3();
+    const attackToEnemy = new THREE.Vector3();
+    const attackRight = new THREE.Vector3();
     const ATTACK_1_RUNTIME_ROLE_LABELS = Object.freeze({
         strikeHand: 'anatomicalLeftHand',
         counterHand: 'anatomicalRightHand',
@@ -246,8 +303,8 @@ export function createGame({ runtime, dom }) {
         lungeDir: new THREE.Vector3(),
         playerHitThisLunge: false,
         hitFlashT: 0,
-        maxHealth: 3,
-        health: 3,
+        maxHealth: 4.0,
+        health: 4.0,
         lastHitAttackId: -1
     };
     createInput({
@@ -392,6 +449,262 @@ export function createGame({ runtime, dom }) {
             return THREE.MathUtils.lerp(ATTACK_1_CARRY_PEAK, ATTACK_1_CARRY_PEAK * 0.88, easeInOutCubic(settleT));
         }
         return THREE.MathUtils.lerp(ATTACK_1_CARRY_PEAK * 0.88, 0, easeInOutCubic((t - 0.82) / 0.18));
+    }
+
+    function getAttack2ChargeRatio(rawChargeT = attack2ChargeT) {
+        if (rawChargeT <= 0 || ATTACK_2_CONFIG.maxChargeTime <= 0) return 0;
+        return THREE.MathUtils.clamp(rawChargeT / ATTACK_2_CONFIG.maxChargeTime, 0, 1);
+    }
+
+    function getAttack2SelectedChargeT(holdT = pendingAttack2HoldT) {
+        if (holdT <= ATTACK_2_CONFIG.holdThreshold) return 0;
+        return THREE.MathUtils.clamp(holdT - ATTACK_2_CONFIG.holdThreshold, 0, ATTACK_2_CONFIG.maxChargeTime);
+    }
+
+    function getAttack2ActiveStartTime(chargeRatio = getAttack2ChargeRatio()) {
+        return ATTACK_2_CONFIG.startupTime + ATTACK_2_CONFIG.chargeStartupBonus * chargeRatio;
+    }
+
+    function getAttack2ActiveEndTime(chargeRatio = getAttack2ChargeRatio()) {
+        return getAttack2ActiveStartTime(chargeRatio) + ATTACK_2_CONFIG.activeTime;
+    }
+
+    function getAttack2RecoveryTime(chargeRatio = getAttack2ChargeRatio()) {
+        return ATTACK_2_CONFIG.recoveryTime + ATTACK_2_CONFIG.recoveryBonus * chargeRatio;
+    }
+
+    function getAttack2TotalTime(chargeRatio = getAttack2ChargeRatio()) {
+        return getAttack2ActiveEndTime(chargeRatio) + getAttack2RecoveryTime(chargeRatio);
+    }
+
+    function getAttack2DisplayT(rawT = attackT, chargeRatio = getAttack2ChargeRatio()) {
+        const startupTime = getAttack2ActiveStartTime(chargeRatio);
+        const activeEndTime = getAttack2ActiveEndTime(chargeRatio);
+        const recoveryTime = getAttack2RecoveryTime(chargeRatio);
+        const decisionTime = ATTACK_2_CONFIG.holdThreshold;
+        const anticipationPoseEnd = 0.22;
+        const clampedT = THREE.MathUtils.clamp(rawT, 0, getAttack2TotalTime(chargeRatio));
+        if (clampedT <= decisionTime) {
+            return THREE.MathUtils.lerp(0, anticipationPoseEnd, easeOutCubic(clampedT / decisionTime));
+        }
+        if (clampedT <= startupTime) {
+            return THREE.MathUtils.lerp(
+                anticipationPoseEnd,
+                ATTACK_2_CONFIG.displayStartupEnd,
+                easeInOutCubic((clampedT - decisionTime) / Math.max(0.0001, startupTime - decisionTime))
+            );
+        }
+        if (clampedT <= activeEndTime) {
+            return THREE.MathUtils.lerp(
+                ATTACK_2_CONFIG.displayStartupEnd,
+                ATTACK_2_CONFIG.displayActiveEnd,
+                (clampedT - startupTime) / ATTACK_2_CONFIG.activeTime
+            );
+        }
+        return THREE.MathUtils.lerp(
+            ATTACK_2_CONFIG.displayActiveEnd,
+            1,
+            (clampedT - activeEndTime) / recoveryTime
+        );
+    }
+
+    function getAttack2MotionT(rawT) {
+        return THREE.MathUtils.clamp(rawT, 0, 1);
+    }
+
+    function getAttack2ChargePoseBlend(rawT, chargeRatio, isCharging = false) {
+        if (chargeRatio <= 0) return 0;
+        if (isCharging) {
+            const chargeT = THREE.MathUtils.smoothstep(rawT, 0.05, ATTACK_2_CONFIG.displayStartupEnd * 0.94);
+            return chargeRatio * easeInOutCubic(chargeT);
+        }
+        return chargeRatio * (1 - THREE.MathUtils.smoothstep(rawT, 0.62, 0.88));
+    }
+
+    function getAttack2ChargeLaneT(rawT) {
+        const laneT = THREE.MathUtils.smoothstep(rawT, 0.22, ATTACK_2_CONFIG.displayStartupEnd * 0.98);
+        return easeInOutCubic(laneT);
+    }
+
+    function getAttack2Damage(chargeRatio = getAttack2ChargeRatio()) {
+        return ATTACK_2_CONFIG.tapDamage * THREE.MathUtils.lerp(1, ATTACK_2_CONFIG.maxDamageScale, chargeRatio);
+    }
+
+    function getAttack2HitStun(chargeRatio = getAttack2ChargeRatio()) {
+        return ATTACK_2_CONFIG.tapHitStun + ATTACK_2_CONFIG.holdHitStunBonus * chargeRatio;
+    }
+
+    function getAttack2Knockback(chargeRatio = getAttack2ChargeRatio()) {
+        return ATTACK_2_CONFIG.tapKnockback + ATTACK_2_CONFIG.holdKnockbackBonus * chargeRatio;
+    }
+
+    function getAttack2HitRange(chargeRatio = getAttack2ChargeRatio()) {
+        return ATTACK_2_CONFIG.tapHitRange + ATTACK_2_CONFIG.holdHitRangeBonus * chargeRatio;
+    }
+
+    function getAttack2CarryPeak(chargeRatio = getAttack2ChargeRatio()) {
+        return ATTACK_2_CONFIG.tapCarryPeak + ATTACK_2_CONFIG.holdCarryBonus * chargeRatio;
+    }
+
+    function getAttack2MaxLateral(chargeRatio = getAttack2ChargeRatio()) {
+        return ATTACK_2_CONFIG.maxLateral - 0.06 * chargeRatio;
+    }
+
+    function setAttack2WeaponTargets(rawT, posTarget, rotTarget, chargeRatio = getAttack2ChargeRatio(), isCharging = false) {
+        const t = THREE.MathUtils.clamp(rawT, 0, 1);
+        if (isCharging) {
+            const holdT = getAttack2ChargeLaneT(t);
+            posTarget.set(
+                THREE.MathUtils.lerp(WEAPON_IDLE_X, 0.018, holdT),
+                THREE.MathUtils.lerp(WEAPON_IDLE_Y, -0.004, holdT),
+                THREE.MathUtils.lerp(WEAPON_IDLE_Z, 0.014, holdT)
+            );
+            rotTarget.set(
+                THREE.MathUtils.lerp(0, -0.56, holdT),
+                THREE.MathUtils.lerp(0, 0.42, holdT),
+                THREE.MathUtils.lerp(0, 0.02, holdT)
+            );
+            return;
+        }
+        if (t <= 0.24) {
+            const p = easeInOutCubic(t / 0.24);
+            posTarget.set(
+                THREE.MathUtils.lerp(WEAPON_IDLE_X, 0.012, p),
+                THREE.MathUtils.lerp(WEAPON_IDLE_Y, -0.006, p),
+                THREE.MathUtils.lerp(WEAPON_IDLE_Z, 0.058, p)
+            );
+            rotTarget.set(
+                THREE.MathUtils.lerp(0, -0.62, p),
+                THREE.MathUtils.lerp(0, 0.78, p),
+                THREE.MathUtils.lerp(0, -0.03, p)
+            );
+        } else if (t <= 0.56) {
+            const p = easeOutCubic((t - 0.24) / 0.32);
+            posTarget.set(
+                THREE.MathUtils.lerp(0.012, 0.01, p),
+                THREE.MathUtils.lerp(-0.006, -0.017, p),
+                THREE.MathUtils.lerp(0.058, 0.09, p)
+            );
+            rotTarget.set(
+                THREE.MathUtils.lerp(-0.62, -0.26, p),
+                THREE.MathUtils.lerp(0.78, -0.02, p),
+                THREE.MathUtils.lerp(-0.03, 0.08, p)
+            );
+        } else if (t <= 0.78) {
+            const p = 1 - Math.pow(1 - ((t - 0.56) / 0.22), 1.55);
+            posTarget.set(
+                THREE.MathUtils.lerp(0.01, 0.011, p),
+                THREE.MathUtils.lerp(-0.017, -0.009, p),
+                THREE.MathUtils.lerp(0.09, 0.082, p)
+            );
+            rotTarget.set(
+                THREE.MathUtils.lerp(-0.26, -0.46, p),
+                THREE.MathUtils.lerp(-0.02, -0.08, p),
+                THREE.MathUtils.lerp(0.08, 0.06, p)
+            );
+        } else {
+            const p = easeInOutCubic((t - 0.78) / 0.22);
+            const oneMinusP = 1 - p;
+
+            const startPosX = 0.011;
+            const startPosY = -0.009;
+            const startPosZ = 0.082;
+            const controlPosX = 0.011;
+            const controlPosY = -0.012;
+            const controlPosZ = 0.06;
+
+            const startRotX = -0.46;
+            const startRotY = -0.08;
+            const startRotZ = 0.06;
+            const controlRotX = -0.22;
+            const controlRotY = -0.02;
+            const controlRotZ = 0.04;
+
+            posTarget.set(
+                oneMinusP * oneMinusP * startPosX + 2 * oneMinusP * p * controlPosX + p * p * WEAPON_IDLE_X,
+                oneMinusP * oneMinusP * startPosY + 2 * oneMinusP * p * controlPosY + p * p * WEAPON_IDLE_Y,
+                oneMinusP * oneMinusP * startPosZ + 2 * oneMinusP * p * controlPosZ + p * p * WEAPON_IDLE_Z
+            );
+            rotTarget.set(
+                oneMinusP * oneMinusP * startRotX + 2 * oneMinusP * p * controlRotX + p * p * 0,
+                oneMinusP * oneMinusP * startRotY + 2 * oneMinusP * p * controlRotY + p * p * 0,
+                oneMinusP * oneMinusP * startRotZ + 2 * oneMinusP * p * controlRotZ + p * p * 0
+            );
+        }
+
+        const chargeSupport = getAttack2ChargePoseBlend(t, chargeRatio, isCharging);
+        const releaseAccent = chargeRatio * THREE.MathUtils.smoothstep(t, ATTACK_2_CONFIG.displayStartupEnd * 0.92, ATTACK_2_CONFIG.displayActiveEnd * 0.94);
+        posTarget.x += 0.008 * chargeSupport - 0.002 * releaseAccent;
+        posTarget.y += 0.01 * chargeSupport - 0.012 * releaseAccent;
+        posTarget.z += -0.055 * chargeSupport + 0.02 * releaseAccent;
+        rotTarget.x += -0.16 * chargeSupport + 0.09 * releaseAccent;
+        rotTarget.y += 0.2 * chargeSupport - 0.08 * releaseAccent;
+        rotTarget.z += -0.02 * chargeSupport + 0.03 * releaseAccent;
+    }
+
+    function getAttack2CarryOffset(rawT, chargeRatio = getAttack2ChargeRatio(), isCharging = false) {
+        const t = THREE.MathUtils.clamp(rawT, 0, 1);
+        const weightShift = 0.018 + 0.03 * chargeRatio;
+        const carryPeak = getAttack2CarryPeak(chargeRatio);
+        if (isCharging) {
+            return THREE.MathUtils.lerp(weightShift * 0.55, weightShift, THREE.MathUtils.smoothstep(t, 0.18, ATTACK_2_CONFIG.displayStartupEnd));
+        }
+        if (t <= 0.24) {
+            return THREE.MathUtils.lerp(0, weightShift, easeOutCubic(t / 0.24));
+        }
+        if (t <= 0.58) {
+            return THREE.MathUtils.lerp(weightShift, carryPeak, easeOutCubic((t - 0.24) / 0.34));
+        }
+        if (t <= 0.84) {
+            const settleT = (t - 0.58) / 0.26;
+            return THREE.MathUtils.lerp(carryPeak, carryPeak * 0.7, easeInOutCubic(settleT));
+        }
+        return THREE.MathUtils.lerp(carryPeak * 0.7, 0, easeInOutCubic((t - 0.84) / 0.16));
+    }
+
+    function getAttackProgress(type, rawT = attackT) {
+        if (type === 'attack1') return Math.min(rawT / ATTACK_1_END_T, 1);
+        if (type === 'attack2') return getAttack2DisplayT(rawT);
+        return 0;
+    }
+
+    function getAttackCarryOffset(type, rawT = attackT) {
+        if (type === 'attack1') return getAttack1CarryOffset(getAttackProgress(type, rawT));
+        if (type === 'attack2') return getAttack2CarryOffset(getAttackProgress(type, rawT), getAttack2ChargeRatio(), attack2IsCharging);
+        return 0;
+    }
+
+    function getAttack2PendingPoseTime(holdT = pendingAttack2HoldT, chargeT = getAttack2SelectedChargeT(holdT)) {
+        const chargeRatio = getAttack2ChargeRatio(chargeT);
+        const thresholdT = ATTACK_2_CONFIG.holdThreshold;
+        const subtlePreviewT = thresholdT * 0.82;
+        if (holdT <= thresholdT) {
+            return subtlePreviewT * easeInOutCubic(holdT / Math.max(0.0001, thresholdT));
+        }
+        const chargeHoldProgress = THREE.MathUtils.clamp(
+            (holdT - thresholdT) / Math.max(0.0001, ATTACK_2_CONFIG.maxChargeTime),
+            0,
+            1
+        );
+        return THREE.MathUtils.lerp(
+            subtlePreviewT,
+            Math.max(0, getAttack2ActiveStartTime(chargeRatio) - 0.0001),
+            easeInOutCubic(chargeHoldProgress)
+        );
+    }
+
+    function getAttack2RootLungeOffset(rawT, chargeRatio = getAttack2ChargeRatio()) {
+        if (chargeRatio <= 0) return 0;
+        const lungeStart = Math.max(0, getAttack2ActiveStartTime(chargeRatio) - 0.015);
+        const lungeEnd = getAttack2ActiveEndTime(chargeRatio) + 0.05;
+        const lungeDistance = 0.38 * easeOutCubic(chargeRatio);
+        if (rawT <= lungeStart) return 0;
+        if (rawT >= lungeEnd) return lungeDistance;
+        return THREE.MathUtils.lerp(
+            0,
+            lungeDistance,
+            easeOutCubic((rawT - lungeStart) / Math.max(0.0001, lungeEnd - lungeStart))
+        );
     }
 
 
@@ -609,6 +922,248 @@ export function createGame({ runtime, dom }) {
         attack1DebugState.braceVals = `${(braceFootHome.x + braceFootX).toFixed(2)}, ${targetBraceFootY.toFixed(2)}, ${(braceFootHome.z + braceFootZ).toFixed(2)}`;
     }
 
+    function applyAttack2Pose(rawT, bodyBob, blend, includeWeaponPose = false, chargeRatio = getAttack2ChargeRatio(), isCharging = false) {
+        const strikeHand = anatomicalLeftHand;
+        const counterHand = anatomicalRightHand;
+        const stepFoot = anatomicalLeftFoot;
+        const braceFoot = anatomicalRightFoot;
+        const strikeHandHome = ANATOMICAL_LEFT_HAND_HOME;
+        const counterHandHome = ANATOMICAL_RIGHT_HAND_HOME;
+        const stepFootHome = ANATOMICAL_LEFT_FOOT_HOME;
+        const braceFootHome = ANATOMICAL_RIGHT_FOOT_HOME;
+        const t = getAttack2MotionT(rawT);
+        const torsoT = Math.min(t + 0.03, 1);
+        const stepT = Math.min(t + 0.05, 1);
+        const handReturnBlend = THREE.MathUtils.smoothstep(rawT, 0.78, 1.0);
+        const torsoReturnBlend = THREE.MathUtils.smoothstep(rawT, 0.82, 1.0);
+        const stepReturnBlend = THREE.MathUtils.smoothstep(rawT, 0.84, 1.0);
+        const chargeCoil = getAttack2ChargePoseBlend(rawT, chargeRatio, isCharging);
+        const releaseDrive = chargeRatio * THREE.MathUtils.smoothstep(rawT, ATTACK_2_CONFIG.displayStartupEnd * 0.9, ATTACK_2_CONFIG.displayActiveEnd * 0.94);
+
+        let strikeHandX, strikeHandY, strikeHandZ, bodyYaw, bodyLean, bodyDrop;
+        let stepFootX, stepFootY, stepFootZ, braceFootX, braceFootY, braceFootZ, stepFootYaw, braceFootYaw;
+        let counterHandX, counterHandY, counterHandZ;
+        let armDepthPush = 0;
+
+        if (t < 0.22) {
+            const p = Math.pow(t / 0.22, 2.25);
+            strikeHandX = THREE.MathUtils.lerp(0.48, 0.42, p);
+            strikeHandY = THREE.MathUtils.lerp(0.92, 0.98, p);
+            strikeHandZ = THREE.MathUtils.lerp(0.12, 0.08, p);
+        } else if (t < 0.56) {
+            const p = 1 - Math.pow(1 - ((t - 0.22) / 0.34), 3.1);
+            strikeHandX = THREE.MathUtils.lerp(0.42, 0.16, p);
+            strikeHandY = THREE.MathUtils.lerp(0.98, 0.64, p);
+            strikeHandZ = THREE.MathUtils.lerp(0.08, 1.18, p);
+            armDepthPush = Math.sin(p * Math.PI) * 0.16;
+        } else if (t < 0.78) {
+            const p = 1 - Math.pow(1 - ((t - 0.56) / 0.22), 1.6);
+            strikeHandX = THREE.MathUtils.lerp(0.16, 0.18, p);
+            strikeHandY = THREE.MathUtils.lerp(0.64, 0.7, p);
+            strikeHandZ = THREE.MathUtils.lerp(1.18, 0.92, p);
+            armDepthPush = THREE.MathUtils.lerp(0.09, 0.03, p);
+        } else {
+            const p = easeOutCubic((t - 0.78) / 0.22);
+            strikeHandX = THREE.MathUtils.lerp(0.18, ANATOMICAL_LEFT_HAND_IDLE.x, p);
+            strikeHandY = THREE.MathUtils.lerp(0.7, ANATOMICAL_LEFT_HAND_IDLE.y, p);
+            strikeHandZ = THREE.MathUtils.lerp(0.92, ANATOMICAL_LEFT_HAND_IDLE.z, p);
+            armDepthPush = THREE.MathUtils.lerp(0.03, 0, p);
+        }
+
+        if (torsoT < 0.22) {
+            const p = Math.pow(torsoT / 0.22, 2.05);
+            bodyYaw = THREE.MathUtils.lerp(0, 0.1, p);
+            bodyLean = THREE.MathUtils.lerp(0, -0.02, p);
+            bodyDrop = THREE.MathUtils.lerp(0, 0.05, p);
+        } else if (torsoT < 0.56) {
+            const p = 1 - Math.pow(1 - ((torsoT - 0.22) / 0.34), 2.85);
+            bodyYaw = THREE.MathUtils.lerp(0.1, -0.18, p);
+            bodyLean = THREE.MathUtils.lerp(-0.02, 0.05, p);
+            bodyDrop = THREE.MathUtils.lerp(0.05, 0.26, p);
+        } else if (torsoT < 0.78) {
+            const p = 1 - Math.pow(1 - ((torsoT - 0.56) / 0.22), 1.45);
+            bodyYaw = THREE.MathUtils.lerp(-0.18, -0.08, p);
+            bodyLean = THREE.MathUtils.lerp(0.05, 0.02, p);
+            bodyDrop = THREE.MathUtils.lerp(0.26, 0.12, p);
+        } else {
+            const p = easeOutCubic((torsoT - 0.78) / 0.22);
+            bodyYaw = THREE.MathUtils.lerp(-0.08, 0, p);
+            bodyLean = THREE.MathUtils.lerp(0.02, 0, p);
+            bodyDrop = THREE.MathUtils.lerp(0.12, 0, p);
+        }
+
+        if (stepT < 0.22) {
+            const p = Math.pow(stepT / 0.22, 2.0);
+            stepFootX = THREE.MathUtils.lerp(0, 0.012, p);
+            stepFootY = THREE.MathUtils.lerp(0, 0.08, p);
+            stepFootZ = THREE.MathUtils.lerp(0, 0.015, p);
+            braceFootX = THREE.MathUtils.lerp(0, -0.01, p);
+            braceFootY = THREE.MathUtils.lerp(0, 0.01, p);
+            braceFootZ = THREE.MathUtils.lerp(0, -0.025, p);
+            stepFootYaw = THREE.MathUtils.lerp(0, 0.03, p);
+            braceFootYaw = THREE.MathUtils.lerp(0, 0.02, p);
+        } else if (stepT < 0.56) {
+            const p = 1 - Math.pow(1 - ((stepT - 0.22) / 0.34), 2.55);
+            stepFootX = THREE.MathUtils.lerp(0.012, 0.06, p);
+            stepFootY = THREE.MathUtils.lerp(0.08, 0, p);
+            stepFootZ = THREE.MathUtils.lerp(0.015, 0.28, p);
+            braceFootX = THREE.MathUtils.lerp(-0.01, -0.022, p);
+            braceFootY = THREE.MathUtils.lerp(0.01, 0, p);
+            braceFootZ = THREE.MathUtils.lerp(-0.025, -0.085, p);
+            stepFootYaw = THREE.MathUtils.lerp(0.03, -0.03, p);
+            braceFootYaw = THREE.MathUtils.lerp(0.02, -0.06, p);
+        } else if (stepT < 0.78) {
+            const p = 1 - Math.pow(1 - ((stepT - 0.56) / 0.22), 1.4);
+            stepFootX = THREE.MathUtils.lerp(0.06, 0.05, p);
+            stepFootY = 0;
+            stepFootZ = THREE.MathUtils.lerp(0.28, 0.22, p);
+            braceFootX = THREE.MathUtils.lerp(-0.022, -0.016, p);
+            braceFootY = 0;
+            braceFootZ = THREE.MathUtils.lerp(-0.085, -0.045, p);
+            stepFootYaw = THREE.MathUtils.lerp(-0.03, -0.01, p);
+            braceFootYaw = THREE.MathUtils.lerp(-0.06, -0.08, p);
+        } else {
+            const p = easeOutCubic((stepT - 0.78) / 0.22);
+            stepFootX = THREE.MathUtils.lerp(0.05, 0, p);
+            stepFootY = 0;
+            stepFootZ = THREE.MathUtils.lerp(0.22, 0, p);
+            braceFootX = THREE.MathUtils.lerp(-0.016, 0, p);
+            braceFootY = 0;
+            braceFootZ = THREE.MathUtils.lerp(-0.045, 0, p);
+            stepFootYaw = THREE.MathUtils.lerp(-0.01, 0, p);
+            braceFootYaw = THREE.MathUtils.lerp(-0.08, 0, p);
+        }
+
+        if (t < 0.22) {
+            const p = Math.pow(t / 0.22, 2.0);
+            counterHandX = THREE.MathUtils.lerp(-0.01, -0.022, p);
+            counterHandY = THREE.MathUtils.lerp(0.17, 0.22, p);
+            counterHandZ = THREE.MathUtils.lerp(-0.11, -0.18, p);
+        } else if (t < 0.56) {
+            const p = 1 - Math.pow(1 - ((t - 0.22) / 0.34), 2.45);
+            counterHandX = THREE.MathUtils.lerp(-0.022, -0.04, p);
+            counterHandY = THREE.MathUtils.lerp(0.22, 0.13, p);
+            counterHandZ = THREE.MathUtils.lerp(-0.18, -0.34, p);
+        } else if (t < 0.78) {
+            const p = 1 - Math.pow(1 - ((t - 0.56) / 0.22), 1.35);
+            counterHandX = THREE.MathUtils.lerp(-0.04, -0.024, p);
+            counterHandY = THREE.MathUtils.lerp(0.13, 0.16, p);
+            counterHandZ = THREE.MathUtils.lerp(-0.34, -0.24, p);
+        } else {
+            const p = easeOutCubic((t - 0.78) / 0.22);
+            counterHandX = THREE.MathUtils.lerp(-0.024, ANATOMICAL_RIGHT_HAND_IDLE.x - counterHandHome.x, p);
+            counterHandY = THREE.MathUtils.lerp(0.15, ANATOMICAL_RIGHT_HAND_IDLE.y - counterHandHome.y, p);
+            counterHandZ = THREE.MathUtils.lerp(-0.24, ANATOMICAL_RIGHT_HAND_IDLE.z - counterHandHome.z, p);
+        }
+
+        if (isCharging) {
+            const holdT = getAttack2ChargeLaneT(rawT);
+            strikeHandX = THREE.MathUtils.lerp(0.46, 0.34, holdT);
+            strikeHandY = THREE.MathUtils.lerp(0.92, 0.82, holdT);
+            strikeHandZ = THREE.MathUtils.lerp(0.12, -0.18, holdT);
+            armDepthPush = THREE.MathUtils.lerp(0, -0.08, holdT);
+            bodyYaw = THREE.MathUtils.lerp(0.02, 0.34, holdT);
+            bodyLean = THREE.MathUtils.lerp(-0.01, -0.06, holdT);
+            bodyDrop = THREE.MathUtils.lerp(0.04, 0.1, holdT);
+            stepFootX = THREE.MathUtils.lerp(0.008, 0.028, holdT);
+            stepFootY = THREE.MathUtils.lerp(0.05, 0.01, holdT);
+            stepFootZ = THREE.MathUtils.lerp(0.012, -0.05, holdT);
+            braceFootX = THREE.MathUtils.lerp(-0.01, -0.02, holdT);
+            braceFootY = THREE.MathUtils.lerp(0.01, 0, holdT);
+            braceFootZ = THREE.MathUtils.lerp(-0.02, -0.075, holdT);
+            stepFootYaw = THREE.MathUtils.lerp(0.012, 0.024, holdT);
+            braceFootYaw = THREE.MathUtils.lerp(0.01, -0.035, holdT);
+            counterHandX = THREE.MathUtils.lerp(-0.016, -0.032, holdT);
+            counterHandY = THREE.MathUtils.lerp(0.18, 0.18, holdT);
+            counterHandZ = THREE.MathUtils.lerp(-0.14, -0.23, holdT);
+        } else {
+            strikeHandX += 0.055 * chargeCoil - 0.015 * releaseDrive;
+            strikeHandY += 0.09 * chargeCoil - 0.09 * releaseDrive;
+            strikeHandZ += -0.42 * chargeCoil + 0.18 * releaseDrive;
+            armDepthPush += -0.09 * chargeCoil + 0.16 * releaseDrive;
+            bodyYaw += 0.34 * chargeCoil - 0.05 * releaseDrive;
+            bodyLean += -0.05 * chargeCoil + 0.05 * releaseDrive;
+            bodyDrop += 0.05 * chargeCoil + 0.07 * releaseDrive;
+            stepFootX += 0.018 * chargeCoil + 0.02 * releaseDrive;
+            stepFootY += 0.02 * chargeCoil + 0.025 * releaseDrive;
+            stepFootZ += -0.08 * chargeCoil + 0.24 * releaseDrive;
+            stepFootYaw -= 0.06 * releaseDrive;
+            braceFootZ -= 0.05 * chargeCoil;
+            braceFootZ += 0.08 * releaseDrive;
+            braceFootYaw += 0.04 * releaseDrive;
+            counterHandY += 0.02 * chargeCoil;
+            counterHandZ -= 0.06 * chargeCoil;
+            strikeHandX = Math.max(strikeHandX, 0.12);
+            counterHandX = Math.min(counterHandX, -0.02);
+        }
+
+        strikeHandX = THREE.MathUtils.lerp(strikeHandX, ANATOMICAL_LEFT_HAND_IDLE.x, handReturnBlend);
+        strikeHandY = THREE.MathUtils.lerp(strikeHandY, ANATOMICAL_LEFT_HAND_IDLE.y, handReturnBlend);
+        strikeHandZ = THREE.MathUtils.lerp(strikeHandZ, ANATOMICAL_LEFT_HAND_IDLE.z, handReturnBlend);
+        armDepthPush = THREE.MathUtils.lerp(armDepthPush, 0, handReturnBlend);
+        counterHandX = THREE.MathUtils.lerp(counterHandX, ANATOMICAL_RIGHT_HAND_IDLE.x - counterHandHome.x, handReturnBlend);
+        counterHandY = THREE.MathUtils.lerp(counterHandY, ANATOMICAL_RIGHT_HAND_IDLE.y - counterHandHome.y, handReturnBlend);
+        counterHandZ = THREE.MathUtils.lerp(counterHandZ, ANATOMICAL_RIGHT_HAND_IDLE.z - counterHandHome.z, handReturnBlend);
+        bodyYaw = THREE.MathUtils.lerp(bodyYaw, 0, torsoReturnBlend);
+        bodyLean = THREE.MathUtils.lerp(bodyLean, 0, torsoReturnBlend);
+        bodyDrop = THREE.MathUtils.lerp(bodyDrop, 0, torsoReturnBlend);
+        stepFootX = THREE.MathUtils.lerp(stepFootX, 0, stepReturnBlend);
+        stepFootY = THREE.MathUtils.lerp(stepFootY, 0, stepReturnBlend);
+        stepFootZ = THREE.MathUtils.lerp(stepFootZ, 0, stepReturnBlend);
+        braceFootX = THREE.MathUtils.lerp(braceFootX, 0, stepReturnBlend);
+        braceFootY = THREE.MathUtils.lerp(braceFootY, 0, stepReturnBlend);
+        braceFootZ = THREE.MathUtils.lerp(braceFootZ, 0, stepReturnBlend);
+        stepFootYaw = THREE.MathUtils.lerp(stepFootYaw, 0, stepReturnBlend);
+        braceFootYaw = THREE.MathUtils.lerp(braceFootYaw, 0, stepReturnBlend);
+
+        const targetBodyY = BODY_HOME_Y + bodyBob - bodyDrop;
+        const targetBodyRotX = 0.1 + bodyDrop * 0.34;
+        const targetStrikeHandY = strikeHandY + bodyBob * 0.12 - bodyDrop * 0.2;
+        const targetCounterHandY = counterHandY + bodyBob * 0.12;
+        const targetBraceFootY = braceFootHome.y + braceFootY + bodyBob * 0.02;
+
+        body.position.y = THREE.MathUtils.lerp(body.position.y, targetBodyY, blend);
+        body.rotation.x = THREE.MathUtils.lerp(body.rotation.x, targetBodyRotX, blend);
+        body.rotation.y = THREE.MathUtils.lerp(body.rotation.y, bodyYaw, blend);
+        body.rotation.z = THREE.MathUtils.lerp(body.rotation.z, bodyLean, blend);
+        eyeL.position.y = THREE.MathUtils.lerp(eyeL.position.y, EYE_L_HOME.y + bodyDrop * 0.03, blend);
+        eyeR.position.y = THREE.MathUtils.lerp(eyeR.position.y, EYE_R_HOME.y + bodyDrop * 0.03, blend);
+
+        braceFoot.position.x = THREE.MathUtils.lerp(braceFoot.position.x, braceFootHome.x + braceFootX, blend);
+        braceFoot.position.y = THREE.MathUtils.lerp(braceFoot.position.y, targetBraceFootY, blend);
+        braceFoot.position.z = THREE.MathUtils.lerp(braceFoot.position.z, braceFootHome.z + braceFootZ, blend);
+        stepFoot.position.x = THREE.MathUtils.lerp(stepFoot.position.x, stepFootHome.x + stepFootX, blend);
+        stepFoot.position.y = THREE.MathUtils.lerp(stepFoot.position.y, stepFootHome.y + stepFootY, blend);
+        stepFoot.position.z = THREE.MathUtils.lerp(stepFoot.position.z, stepFootHome.z + stepFootZ, blend);
+        braceFoot.rotation.y = THREE.MathUtils.lerp(braceFoot.rotation.y, braceFootYaw, blend);
+        stepFoot.rotation.y = THREE.MathUtils.lerp(stepFoot.rotation.y, stepFootYaw, blend);
+
+        strikeHand.position.x = THREE.MathUtils.lerp(strikeHand.position.x, strikeHandX, blend);
+        strikeHand.position.y = THREE.MathUtils.lerp(strikeHand.position.y, targetStrikeHandY, blend);
+        strikeHand.position.z = THREE.MathUtils.lerp(strikeHand.position.z, strikeHandZ + armDepthPush, blend);
+        counterHand.position.x = THREE.MathUtils.lerp(counterHand.position.x, counterHandHome.x + counterHandX, blend);
+        counterHand.position.y = THREE.MathUtils.lerp(counterHand.position.y, counterHandHome.y + targetCounterHandY, blend);
+        counterHand.position.z = THREE.MathUtils.lerp(counterHand.position.z, counterHandHome.z + counterHandZ, blend);
+
+        strikeHand.rotation.x = THREE.MathUtils.lerp(strikeHand.rotation.x, 0.32 + Math.abs(bodyYaw) * 0.08, blend);
+        strikeHand.rotation.y = THREE.MathUtils.lerp(strikeHand.rotation.y, bodyYaw * 0.12, blend);
+        strikeHand.rotation.z = THREE.MathUtils.lerp(strikeHand.rotation.z, 0.06 - bodyYaw * 0.08, blend);
+        counterHand.rotation.x = THREE.MathUtils.lerp(counterHand.rotation.x, 0.12 + Math.abs(bodyYaw) * 0.04, blend);
+        counterHand.rotation.y = THREE.MathUtils.lerp(counterHand.rotation.y, -bodyYaw * 0.06, blend);
+        counterHand.rotation.z = THREE.MathUtils.lerp(counterHand.rotation.z, -0.04 + bodyYaw * 0.04, blend);
+
+        if (includeWeaponPose) {
+            setAttack2WeaponTargets(rawT, attack2WeaponReturnPos, attack2WeaponReturnRot, chargeRatio, isCharging);
+            weaponPivot.scale.setScalar(1);
+            weaponPivot.position.x = THREE.MathUtils.lerp(WEAPON_IDLE_X, attack2WeaponReturnPos.x, blend);
+            weaponPivot.position.y = THREE.MathUtils.lerp(WEAPON_IDLE_Y, attack2WeaponReturnPos.y, blend);
+            weaponPivot.position.z = THREE.MathUtils.lerp(WEAPON_IDLE_Z, attack2WeaponReturnPos.z, blend);
+            weaponPivot.rotation.x = THREE.MathUtils.lerp(0, attack2WeaponReturnRot.x, blend);
+            weaponPivot.rotation.y = THREE.MathUtils.lerp(0, attack2WeaponReturnRot.y, blend);
+            weaponPivot.rotation.z = THREE.MathUtils.lerp(0, attack2WeaponReturnRot.z, blend);
+        }
+    }
+
     function updateEnemyHealthBar() {
         const ratio = THREE.MathUtils.clamp(enemy.health / enemy.maxHealth, 0, 1);
         enemyHpFill.scale.x = ratio;
@@ -616,8 +1171,25 @@ export function createGame({ runtime, dom }) {
         enemyHpFill.material.color.set(ratio > 0.5 ? 0xff627f : 0xff3b5c);
     }
 
-    function resetCombo() {
-        comboStep = 0;
+    function resetPendingAttack2() {
+        pendingAttack2 = false;
+        pendingAttack2HoldT = 0;
+    }
+
+    function resetAttackState() {
+        isAttacking = false;
+        currentAttackType = null;
+        attackT = 0;
+        previousAttackT = 0;
+        attackHitConnected = false;
+        attackStartedFromBridge = false;
+        attackEntryCarry = 0;
+        attackBridgeBlendT = 0;
+        attack2ChargeT = 0;
+        attack2IsCharging = false;
+        attack2Released = false;
+        queuedAttackType = null;
+        queuedAttackT = 0;
         comboTag.innerText = 'READY';
     }
 
@@ -674,25 +1246,51 @@ export function createGame({ runtime, dom }) {
         }
     }
 
-    function triggerAttack(worldMove) {
-        if (isAttacking || isRolling) return false;
-        isAttacking = true;
-        attackT = 0;
-        attackId += 1;
-        if (comboStep === 0) {
-            previousAttackT = 0;
-            if (attack1DebugEnabled) {
-                console.info(
-                    `[ATTACK 1 DEBUG] strikeHand:${ATTACK_1_RUNTIME_ROLE_LABELS.strikeHand} counterHand:${ATTACK_1_RUNTIME_ROLE_LABELS.counterHand} stepFoot:${ATTACK_1_RUNTIME_ROLE_LABELS.stepFoot} braceFoot:${ATTACK_1_RUNTIME_ROLE_LABELS.braceFoot} weaponParent:${getWeaponParentLabel()}`
-                );
-            }
+    function startAttack(type, worldMove, { fromBridge = false, preserveIntent = false } = {}) {
+        if (!fromBridge && (isAttacking || isRolling)) return false;
+        resetPendingAttack2();
+        if (fromBridge) {
+            attackEntryCarry = getAttackCarryOffset(currentAttackType, attackT);
+        } else {
+            attackEntryCarry = 0;
         }
-        comboWindow = 0;
-        getAttackIntent(worldMove);
+        isAttacking = true;
+        currentAttackType = type;
+        attackT = fromBridge && type === 'attack1'
+            ? ATTACK_1_END_T * ATTACK_1_BRIDGE_START_PROGRESS
+            : 0;
+        attackId += 1;
+        previousAttackT = 0;
+        attackHitConnected = false;
+        attackStartedFromBridge = fromBridge && type === 'attack1';
+        attackBridgeBlendT = 0;
+        attack2ChargeT = 0;
+        attack2IsCharging = false;
+        attack2Released = type !== 'attack2';
+        queuedAttackType = null;
+        queuedAttackT = 0;
+        if (type === 'attack1' && attack1DebugEnabled) {
+            console.info(
+                `[ATTACK 1 DEBUG] strikeHand:${ATTACK_1_RUNTIME_ROLE_LABELS.strikeHand} counterHand:${ATTACK_1_RUNTIME_ROLE_LABELS.counterHand} stepFoot:${ATTACK_1_RUNTIME_ROLE_LABELS.stepFoot} braceFoot:${ATTACK_1_RUNTIME_ROLE_LABELS.braceFoot} weaponParent:${getWeaponParentLabel()}`
+            );
+        }
+        if (!preserveIntent) getAttackIntent(worldMove);
         attackEntryWeaponPos.copy(weaponPivot.position);
         attackEntryWeaponRot.set(weaponPivot.rotation.x, weaponPivot.rotation.y, weaponPivot.rotation.z);
-        trailMat.opacity = comboStep === 0 ? 0.58 : 0.9;
-        comboTag.innerText = comboStep === 2 ? 'BATON TWIRL' : `ATTACK ${comboStep + 1}`;
+        trailMat.opacity = Math.max(trailMat.opacity, type === 'attack1' ? ATTACK_1_CONFIG.trailOpacity : ATTACK_2_CONFIG.trailOpacity);
+        comboTag.innerText = type === 'attack1' ? 'ATTACK 1' : 'ATTACK 2';
+        return true;
+    }
+
+    function startAttack2Variant(worldMove, holdT) {
+        const selectedChargeT = getAttack2SelectedChargeT(holdT);
+        const selectedPoseT = getAttack2PendingPoseTime(holdT, selectedChargeT);
+        if (!startAttack('attack2', worldMove)) return false;
+        attackT = selectedPoseT;
+        previousAttackT = selectedPoseT;
+        attack2ChargeT = selectedChargeT;
+        attack2IsCharging = false;
+        attack2Released = true;
         return true;
     }
 
@@ -711,6 +1309,7 @@ export function createGame({ runtime, dom }) {
 
     function startRoll(worldMove) {
         if (isRolling || isAttacking || rollCooldownT > 0 || playerHitStunT > 0 || playerHp <= 0) return false;
+        resetPendingAttack2();
         isRolling = true;
         rollT = ROLL_DURATION;
         rollCooldownT = ROLL_COOLDOWN;
@@ -727,10 +1326,21 @@ export function createGame({ runtime, dom }) {
         return progress >= 0.12 && progress <= 0.78;
     }
 
-    function getAttackActiveWindow(step, t) {
-        if (step === 0) return t >= 0.22 && t <= 0.6;
-        if (step === 1) return t >= 0.24 && t <= 0.62;
-        return t >= 0.18 && t <= 0.72;
+    function shouldEvaluateAttackHit(type, t, prevT, chargeRatio = 0) {
+        const activeStart = type === 'attack1' ? ATTACK_1_CONFIG.activeStart : getAttack2ActiveStartTime(chargeRatio);
+        const activeEnd = type === 'attack1' ? ATTACK_1_CONFIG.activeEnd : getAttack2ActiveEndTime(chargeRatio);
+        const inWindow = t >= activeStart && t <= activeEnd;
+        const overlappedWindow = prevT < activeEnd && t >= activeStart;
+        return inWindow || overlappedWindow;
+    }
+
+    function canBridgeAttack2IntoAttack1(t, chargeRatio = getAttack2ChargeRatio()) {
+        const activeEnd = getAttack2ActiveEndTime(chargeRatio);
+        return attackHitConnected
+            && queuedAttackType === 'attack1'
+            && queuedAttackT > 0
+            && t >= activeEnd - ATTACK_2_CONFIG.bridgeWindowLead
+            && t <= activeEnd + ATTACK_2_CONFIG.bridgeWindowLag;
     }
 
     function pointToSegmentDistanceXZ(point, a, b) {
@@ -789,23 +1399,50 @@ export function createGame({ runtime, dom }) {
             return;
         }
 
-        if (isAttacking) {
-            body.rotation.x = 0.08;
-            body.rotation.y = 0;
-            body.rotation.z = 0;
-            anatomicalRightFoot.position.copy(ANATOMICAL_RIGHT_FOOT_HOME).add(tempVecC.set(0, bodyBob * 0.15, 0));
-            anatomicalLeftFoot.position.copy(ANATOMICAL_LEFT_FOOT_HOME).add(tempVecA.set(0, bodyBob * 0.15, 0));
+        if (pendingAttack2) {
+            const previewChargeT = getAttack2SelectedChargeT(pendingAttack2HoldT);
+            const previewChargeRatio = getAttack2ChargeRatio(previewChargeT);
+            const previewPhaseT = getAttack2PendingPoseTime(pendingAttack2HoldT, previewChargeT);
+            const attack2PreviewT = getAttack2DisplayT(previewPhaseT, previewChargeRatio);
+            applyAttack2Pose(
+                attack2PreviewT,
+                bodyBob,
+                1,
+                true,
+                previewChargeRatio,
+                pendingAttack2HoldT >= ATTACK_2_CONFIG.holdThreshold
+            );
+            return;
+        }
 
-            if (comboStep === 0) {
+        if (isAttacking) {
+            if (currentAttackType === 'attack1') {
+                if (!attackStartedFromBridge) {
+                    body.rotation.x = 0.08;
+                    body.rotation.y = 0;
+                    body.rotation.z = 0;
+                    anatomicalRightFoot.position.copy(ANATOMICAL_RIGHT_FOOT_HOME).add(tempVecC.set(0, bodyBob * 0.15, 0));
+                    anatomicalLeftFoot.position.copy(ANATOMICAL_LEFT_FOOT_HOME).add(tempVecA.set(0, bodyBob * 0.15, 0));
+                }
+
                 const attack1PreviewT = Math.min((attackT + dt * 1.9) / ATTACK_1_END_T, 1);
-                applyAttack1Pose(attack1PreviewT, bodyBob, 1, false);
+                const bridgeBlend = attackStartedFromBridge
+                    ? THREE.MathUtils.smoothstep(attackBridgeBlendT, 0, ATTACK_1_BRIDGE_BLEND_TIME)
+                    : 1;
+                applyAttack1Pose(attack1PreviewT, bodyBob, bridgeBlend, false);
                 return;
             }
 
-            anatomicalRightHand.position.copy(ANATOMICAL_RIGHT_HAND_HOME).add(tempVecA.set(-0.02, bodyBob * 0.35, 0.02));
-            anatomicalLeftHand.position.copy(ANATOMICAL_LEFT_HAND_HOME).add(tempVecB.set(0.02, 0.02 + bodyBob * 0.4, -0.04));
-            anatomicalLeftHand.rotation.z = 0.1;
-            return;
+            if (currentAttackType === 'attack2') {
+                const previewChargeT = attack2IsCharging
+                    ? Math.min(ATTACK_2_CONFIG.maxChargeTime, attack2ChargeT + dt * ATTACK_2_CONFIG.playbackRate)
+                    : attack2ChargeT;
+                const previewChargeRatio = getAttack2ChargeRatio(previewChargeT);
+                const previewPhaseT = Math.min(attackT + dt * ATTACK_2_CONFIG.playbackRate, getAttack2TotalTime(previewChargeRatio));
+                const attack2PreviewT = getAttack2DisplayT(previewPhaseT, previewChargeRatio);
+                applyAttack2Pose(attack2PreviewT, bodyBob, 1, false, previewChargeRatio, attack2IsCharging);
+                return;
+            }
         }
 
 
@@ -858,17 +1495,24 @@ export function createGame({ runtime, dom }) {
         addSnap(10);
     }
 
-    function hitEnemy() {
+    function hitEnemy(attackType, chargeRatio = 0) {
         if (enemy.state === 'dead' || enemy.lastHitAttackId === attackId) return;
         enemyCore.getWorldPosition(enemyCenter);
-        enemy.health -= 1;
+        const damage = attackType === 'attack1' ? ATTACK_1_CONFIG.damage : getAttack2Damage(chargeRatio);
+        const knockback = attackType === 'attack1' ? ATTACK_1_CONFIG.knockback : getAttack2Knockback(chargeRatio);
+        const hitStun = attackType === 'attack1' ? ATTACK_1_CONFIG.hitStun : getAttack2HitStun(chargeRatio);
+        enemy.health -= damage;
+        attackHitConnected = true;
         enemy.lastHitAttackId = attackId;
         enemy.hitFlashT = 0.12;
         hitStopT = 0.045;
         impactBurstT = 0.12;
         hitBurst.position.copy(enemyCenter);
         addSnap(enemy.health <= 0 ? 0 : 6);
-        enemyKnockback.copy(attackIntent).multiplyScalar(6.5);
+        enemyKnockback.copy(attackIntent).multiplyScalar(knockback);
+        if (attackType === 'attack2') {
+            enemyPivot.position.addScaledVector(attackIntent, 0.08 + 0.16 * chargeRatio);
+        }
         updateEnemyHealthBar();
 
         if (enemy.health <= 0) {
@@ -877,12 +1521,13 @@ export function createGame({ runtime, dom }) {
         }
 
         enemy.state = 'hitstun';
-        enemy.hitStunT = 0.24;
+        enemy.hitStunT = hitStun;
         enemy.playerHitThisLunge = false;
     }
 
     function hitPlayer() {
         if (playerHp <= 0 || isRollInvulnerable()) return;
+        resetPendingAttack2();
         setPlayerHp(playerHp - 1);
         playerFlashT = 0.28;
         damageTintT = 0.1;
@@ -891,6 +1536,15 @@ export function createGame({ runtime, dom }) {
         if (playerHp <= 0) {
             comboTag.innerText = 'DOWN';
             isAttacking = false;
+            currentAttackType = null;
+            bufferedAttackType = null;
+            queuedAttackType = null;
+            attackBufferT = 0;
+            queuedAttackT = 0;
+            attackStartedFromBridge = false;
+            attack2ChargeT = 0;
+            attack2IsCharging = false;
+            attack2Released = false;
             trailMat.opacity = 0;
         }
     }
@@ -1074,14 +1728,55 @@ export function createGame({ runtime, dom }) {
 
         if (moveInput.lengthSq() > 1) moveInput.normalize();
 
-        const attackPressed = keys.Space || !!(gp && gp.buttons[0] && gp.buttons[0].pressed);
-        const attackJustPressed = attackPressed && !attackHeld;
-        if (attackJustPressed && (!isRolling || rollT <= ROLL_BUFFER_WINDOW)) attackBufferT = ATTACK_BUFFER;
-        attackHeld = attackPressed;
-        if (attackBufferT > 0) attackBufferT -= dt;
+        const attack2Pressed = keys.KeyE || !!(gp && gp.buttons[2] && gp.buttons[2].pressed);
+        const attack2JustPressed = attack2Pressed && !attack2Held;
+        const attack2JustReleased = !attack2Pressed && attack2Held;
+        const attack1Pressed = keys.Space || !!(gp && gp.buttons[0] && gp.buttons[0].pressed);
+        const attack1JustPressed = attack1Pressed && !attack1Held;
+        if (!isRolling || rollT <= ROLL_BUFFER_WINDOW) {
+            if (attack2JustPressed && !isAttacking && !pendingAttack2 && playerHitStunT <= 0 && playerHp > 0) {
+                resetPendingAttack2();
+                pendingAttack2 = true;
+                pendingAttack2HoldT = 0;
+                bufferedAttackType = null;
+                attackBufferT = 0;
+            } else if (attack1JustPressed) {
+                resetPendingAttack2();
+                attackBufferT = ATTACK_BUFFER;
+                bufferedAttackType = 'attack1';
+            }
 
+            if (isAttacking && currentAttackType === 'attack2' && attack1JustPressed) {
+                queuedAttackType = 'attack1';
+                queuedAttackT = ATTACK_BUFFER;
+            }
+        }
+        attack2Held = attack2Pressed;
+        attack1Held = attack1Pressed;
         cameraOrbit.rotation.y = THREE.MathUtils.lerp(cameraOrbit.rotation.y, orbitY, 0.1);
         const worldMove = moveInput.clone().applyAxisAngle(moveAxis, cameraOrbit.rotation.y);
+        if (pendingAttack2) {
+            pendingAttack2HoldT = Math.min(
+                ATTACK_2_CONFIG.holdThreshold + ATTACK_2_CONFIG.maxChargeTime,
+                pendingAttack2HoldT + rawDt
+            );
+            if (attack2JustReleased) {
+                if (startAttack2Variant(worldMove, pendingAttack2HoldT)) {
+                    attackBufferT = 0;
+                    bufferedAttackType = null;
+                } else {
+                    resetPendingAttack2();
+                }
+            }
+        }
+        if (attackBufferT > 0) {
+            attackBufferT = Math.max(0, attackBufferT - dt);
+            if (attackBufferT <= 0) bufferedAttackType = null;
+        }
+        if (queuedAttackT > 0) {
+            queuedAttackT = Math.max(0, queuedAttackT - dt);
+            if (queuedAttackT <= 0) queuedAttackType = null;
+        }
         const rollPressed = keys.ShiftLeft || !!(gp && gp.buttons[1] && gp.buttons[1].pressed);
         const rollJustPressed = rollPressed && !rollHeld;
         if (rollJustPressed) startRoll(worldMove);
@@ -1109,6 +1804,11 @@ export function createGame({ runtime, dom }) {
                 playerModel.scale.setScalar(1);
                 resetWeaponToIdle();
             }
+        } else if (pendingAttack2 && playerHitStunT <= 0 && playerHp > 0) {
+            playerModel.rotation.x = 0;
+            playerModel.position.y = 0;
+            playerModel.scale.setScalar(1);
+            rotateModelToward(getAttackIntent(worldMove), 0.3);
         } else if (worldMove.lengthSq() > 0.01 && !isAttacking && playerHitStunT <= 0 && playerHp > 0) {
             playerModel.rotation.x = 0;
             playerModel.position.y = 0;
@@ -1124,65 +1824,67 @@ export function createGame({ runtime, dom }) {
 
         updatePlayerProcedural(dt, THREE.MathUtils.clamp(worldMove.length(), 0, 1));
 
-        if (!isAttacking && comboWindow > 0) {
-            comboWindow -= dt;
-            if (comboWindow <= 0) resetCombo();
-        }
-
-        if (!isAttacking && !isRolling && attackBufferT > 0 && playerHitStunT <= 0 && playerHp > 0) {
-            if (triggerAttack(worldMove)) attackBufferT = 0;
+        if (!isAttacking && !isRolling && attackBufferT > 0 && bufferedAttackType && playerHitStunT <= 0 && playerHp > 0) {
+            if (startAttack(bufferedAttackType, worldMove)) {
+                attackBufferT = 0;
+                bufferedAttackType = null;
+            }
         }
 
         updateEnemy(dt, clock.elapsedTime);
 
         // --- ANIMATION ENGINE ---
         if (isAttacking) {
-            attackT += dt * (comboStep === 0 ? 1.9 : 4);
-            const attackNorm = comboStep === 0 ? attackT / ATTACK_1_END_T : attackT;
-            const t = Math.min(attackNorm, 1);
-            const lerpT = 1 - Math.pow(1 - t, 3);
-            const attackBlend = THREE.MathUtils.clamp(t * 4.5, 0, 1);
+            if (currentAttackType === 'attack1' && attackStartedFromBridge) {
+                attackBridgeBlendT = Math.min(ATTACK_1_BRIDGE_BLEND_TIME, attackBridgeBlendT + dt);
+            }
+            if (currentAttackType === 'attack1') {
+                attackT += dt * 1.9;
+            } else {
+                attackT += dt * ATTACK_2_CONFIG.playbackRate;
+            }
 
-            if (comboStep === 0) {
-                const attack1WeaponBlend = attackBlend;
+            const attackChargeRatio = currentAttackType === 'attack2' ? getAttack2ChargeRatio() : 0;
+            const t = getAttackProgress(currentAttackType);
+            const attackBlend = THREE.MathUtils.clamp(t * 4.5, 0, 1);
+            const attackWindowT = currentAttackType === 'attack1' ? t : attackT;
+
+            if (currentAttackType === 'attack2' && attackIntent.lengthSq() > 0.01) {
+                const prevRootLunge = getAttack2RootLungeOffset(previousAttackT, attackChargeRatio);
+                const nextRootLunge = getAttack2RootLungeOffset(attackWindowT, attackChargeRatio);
+                const rootLungeDelta = nextRootLunge - prevRootLunge;
+                if (rootLungeDelta > 0) {
+                    playerPivot.position.addScaledVector(attackIntent, rootLungeDelta);
+                }
+            }
+
+            if (currentAttackType === 'attack1') {
                 setAttack1WeaponTargets(t, attack1WeaponReturnPos, attack1WeaponReturnRot);
                 weaponPivot.position.lerpVectors(
                     attackEntryWeaponPos,
                     attackTargetWeaponPos.set(attack1WeaponReturnPos.x, attack1WeaponReturnPos.y, attack1WeaponReturnPos.z),
-                    attack1WeaponBlend
+                    attackBlend
                 );
-                weaponPivot.rotation.x = THREE.MathUtils.lerp(attackEntryWeaponRot.x, attack1WeaponReturnRot.x, attack1WeaponBlend);
-                weaponPivot.rotation.y = THREE.MathUtils.lerp(attackEntryWeaponRot.y, attack1WeaponReturnRot.y, attack1WeaponBlend);
-                weaponPivot.rotation.z = THREE.MathUtils.lerp(attackEntryWeaponRot.z, attack1WeaponReturnRot.z, attack1WeaponBlend);
-                trailMat.opacity = THREE.MathUtils.lerp(0.56, 0.04, easeInOutCubic(THREE.MathUtils.smoothstep(t, 0.5, 1.0)));
-            } else if (comboStep === 1) {
-                weaponPivot.position.lerpVectors(attackEntryWeaponPos, attackTargetWeaponPos.set(WEAPON_IDLE_X, WEAPON_IDLE_Y, WEAPON_IDLE_Z), attackBlend);
-                weaponPivot.rotation.x = THREE.MathUtils.lerp(attackEntryWeaponRot.x, 0, attackBlend);
-                weaponPivot.rotation.z = THREE.MathUtils.lerp(attackEntryWeaponRot.z, 0, attackBlend);
-                weaponPivot.rotation.y = THREE.MathUtils.lerp(attackEntryWeaponRot.y, THREE.MathUtils.lerp(-2, 2, lerpT), attackBlend);
+                weaponPivot.rotation.x = THREE.MathUtils.lerp(attackEntryWeaponRot.x, attack1WeaponReturnRot.x, attackBlend);
+                weaponPivot.rotation.y = THREE.MathUtils.lerp(attackEntryWeaponRot.y, attack1WeaponReturnRot.y, attackBlend);
+                weaponPivot.rotation.z = THREE.MathUtils.lerp(attackEntryWeaponRot.z, attack1WeaponReturnRot.z, attackBlend);
+                trailMat.opacity = THREE.MathUtils.lerp(ATTACK_1_CONFIG.trailOpacity, 0.04, easeInOutCubic(THREE.MathUtils.smoothstep(t, 0.5, 1.0)));
             } else {
-                weaponPivot.position.lerpVectors(attackEntryWeaponPos, attackTargetWeaponPos.set(WEAPON_IDLE_X, WEAPON_IDLE_Y, WEAPON_IDLE_Z), attackBlend);
-                weaponPivot.rotation.x = THREE.MathUtils.lerp(attackEntryWeaponRot.x, 0, attackBlend);
-                weaponPivot.rotation.z = THREE.MathUtils.lerp(attackEntryWeaponRot.z, 0, attackBlend);
-                weaponPivot.rotation.y = THREE.MathUtils.lerp(attackEntryWeaponRot.y, -Math.sin(t * 40) * 2.5 * (1 - t), attackBlend);
-                playerPivot.position.add(new THREE.Vector3(0, 0, 1).applyQuaternion(playerModel.quaternion).multiplyScalar(0.18 * (1 - t)));
+                setAttack2WeaponTargets(t, attack2WeaponReturnPos, attack2WeaponReturnRot, attackChargeRatio, attack2IsCharging);
+                weaponPivot.position.lerpVectors(
+                    attackEntryWeaponPos,
+                    attackTargetWeaponPos.set(attack2WeaponReturnPos.x, attack2WeaponReturnPos.y, attack2WeaponReturnPos.z),
+                    attackBlend
+                );
+                weaponPivot.rotation.x = THREE.MathUtils.lerp(attackEntryWeaponRot.x, attack2WeaponReturnRot.x, attackBlend);
+                weaponPivot.rotation.y = THREE.MathUtils.lerp(attackEntryWeaponRot.y, attack2WeaponReturnRot.y, attackBlend);
+                weaponPivot.rotation.z = THREE.MathUtils.lerp(attackEntryWeaponRot.z, attack2WeaponReturnRot.z, attackBlend);
+                trailMat.opacity = attack2IsCharging
+                    ? THREE.MathUtils.lerp(trailMat.opacity, 0.06, 0.25)
+                    : THREE.MathUtils.lerp(ATTACK_2_CONFIG.trailOpacity, 0.03, easeInOutCubic(THREE.MathUtils.smoothstep(t, 0.42, 1.0)));
             }
 
-            if ((comboStep === 0 ? attackT >= ATTACK_1_END_T : attackT >= 1)) {
-                isAttacking = false;
-                previousAttackT = 0;
-                comboStep = 0;
-                comboWindow = 0;
-                resetCombo();
-            }
-
-            const inWindow = t >= ATTACK_1_CONFIG.activeStart && t <= ATTACK_1_CONFIG.activeEnd;
-            const overlappedWindow = previousAttackT < ATTACK_1_CONFIG.activeEnd && t >= ATTACK_1_CONFIG.activeStart;
-            const shouldEvaluateAttack1Hit = comboStep === 0 && (inWindow || overlappedWindow);
-            const shouldEvaluateHit = comboStep === 0
-                ? shouldEvaluateAttack1Hit
-                : getAttackActiveWindow(comboStep, t);
-
+            const shouldEvaluateHit = shouldEvaluateAttackHit(currentAttackType, attackWindowT, previousAttackT, attackChargeRatio);
             if (enemy.state !== 'dead' && enemyPivot.visible && shouldEvaluateHit) {
                 enemyCore.getWorldPosition(enemyCenter);
                 base.getWorldPosition(attackBasePos);
@@ -1190,26 +1892,62 @@ export function createGame({ runtime, dom }) {
                 const hitDistance = pointToSegmentDistanceXZ(enemyCenter, attackBasePos, attackTipPos);
                 const swingMidY = (attackBasePos.y + attackTipPos.y) * 0.5;
                 const verticalDelta = Math.abs(enemyCenter.y - swingMidY);
-                const hitRange = comboStep === 0 ? ATTACK_1_CONFIG.hitRange : 1.58;
-                if (hitDistance < hitRange && verticalDelta < 1.0) {
-                    hitEnemy();
+                let passesHit = false;
+
+                if (currentAttackType === 'attack1') {
+                    passesHit = hitDistance < ATTACK_1_CONFIG.hitRange && verticalDelta < 1.0;
+                } else {
+                    attackToEnemy.subVectors(enemyCenter, playerPivot.position).setY(0);
+                    attackRight.set(attackIntent.z, 0, -attackIntent.x);
+                    const forwardDistance = attackToEnemy.dot(attackIntent);
+                    const lateralDistance = Math.abs(attackToEnemy.dot(attackRight));
+                    passesHit =
+                        hitDistance < getAttack2HitRange(attackChargeRatio)
+                        && verticalDelta < ATTACK_2_CONFIG.verticalRange
+                        && forwardDistance >= ATTACK_2_CONFIG.minForward + 0.06 * attackChargeRatio
+                        && lateralDistance <= getAttack2MaxLateral(attackChargeRatio);
+                }
+
+                if (passesHit) {
+                    hitEnemy(currentAttackType, attackChargeRatio);
                 }
             }
 
-            if (comboStep === 0) previousAttackT = t;
-        } else if (comboWindow > 0) {
-            trailMat.opacity = THREE.MathUtils.lerp(trailMat.opacity, 0, 0.1);
+            previousAttackT = attackWindowT;
+
+            if (currentAttackType === 'attack2' && canBridgeAttack2IntoAttack1(attackWindowT, attackChargeRatio)) {
+                if (startAttack('attack1', worldMove, { fromBridge: true, preserveIntent: true })) {
+                    attackBufferT = 0;
+                    bufferedAttackType = null;
+                }
+            } else if (
+                (currentAttackType === 'attack1' && attackT >= ATTACK_1_END_T)
+                || (currentAttackType === 'attack2' && attackT >= getAttack2TotalTime(attackChargeRatio))
+            ) {
+                resetAttackState();
+            }
         } else {
             trailMat.opacity = THREE.MathUtils.lerp(trailMat.opacity, 0, 0.1);
         }
 
-        let attack1Carry = 0;
-        if (isAttacking && comboStep === 0) {
-            attack1Carry = getAttack1CarryOffset(attackT);
+        let attackCarry = 0;
+        if (isAttacking) {
+            const attackProgress = getAttackProgress(currentAttackType);
+            if (currentAttackType === 'attack1') {
+                const attack1Carry = getAttack1CarryOffset(attackProgress);
+                if (attackStartedFromBridge) {
+                    const carryBlend = THREE.MathUtils.smoothstep(attackBridgeBlendT, 0, ATTACK_1_BRIDGE_BLEND_TIME);
+                    attackCarry = THREE.MathUtils.lerp(attackEntryCarry, attack1Carry, carryBlend);
+                } else {
+                    attackCarry = attack1Carry;
+                }
+            } else {
+                attackCarry = getAttack2CarryOffset(attackProgress, getAttack2ChargeRatio(), attack2IsCharging);
+            }
         }
         playerForward.set(0, 0, 1).applyAxisAngle(moveAxis, playerModel.rotation.y).normalize();
-        playerModel.position.x = playerForward.x * attack1Carry;
-        playerModel.position.z = playerForward.z * attack1Carry;
+        playerModel.position.x = playerForward.x * attackCarry;
+        playerModel.position.z = playerForward.z * attackCarry;
 
         playerFlashT = Math.max(0, playerFlashT - rawDt);
         const playerFlashMix = playerFlashT > 0 ? Math.min(1, playerFlashT / 0.28) : 0;
