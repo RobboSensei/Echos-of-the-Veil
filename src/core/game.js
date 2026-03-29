@@ -76,6 +76,7 @@ export function createGame({ runtime, dom }) {
     const playerHpFill = dom.playerHpFill;
     const damageTint = dom.damageTint;
     const attack1DebugEl = dom.attack1DebugEl;
+    const deathScreen = dom.deathScreen;
 
     // --- SCENE SETUP ---
     const clock = runtime.clock;
@@ -204,6 +205,8 @@ export function createGame({ runtime, dom }) {
     let attack2ChargeT = 0;
     let attack2IsCharging = false;
     let attack2Released = false;
+    let defeatedEnemyCount = 0;
+    let isGameOver = false;
     let isBlocking = false;
     let isRolling = false;
     let rollT = 0;
@@ -817,6 +820,7 @@ export function createGame({ runtime, dom }) {
         enemy.hitFlashT = 0.16;
         enemyKnockback.set(0, 0, 0);
         updateEnemyHealthBar(echoStalker);
+        defeatedEnemyCount += 1;
         addSnap(10);
         if (activeEnemyCount === 1) queueNextWave();
     }
@@ -892,6 +896,7 @@ export function createGame({ runtime, dom }) {
             playerKnockback.copy(sourceEchoStalker.enemy.lungeDir).multiplyScalar(8.5);
         }
         if (playerHp <= 0) {
+            isGameOver = true;
             comboTag.innerText = 'DOWN';
             isAttacking = false;
             currentAttackType = null;
@@ -904,6 +909,7 @@ export function createGame({ runtime, dom }) {
             attack2IsCharging = false;
             attack2Released = false;
             trailMat.opacity = 0;
+            if (deathScreen) deathScreen.show({ defeatedEnemyCount });
         }
     }
 
@@ -943,11 +949,20 @@ export function createGame({ runtime, dom }) {
     function frame() {
         const rawDt = clock.getDelta();
         const dt = hitStopT > 0 ? 0 : Math.min(rawDt, 0.033);
+        const gp = navigator.getGamepads()[0];
+        if (isGameOver) {
+            if (deathScreen) {
+                deathScreen.update({
+                    confirmPressed: !!(gp && gp.buttons[0] && gp.buttons[0].pressed)
+                });
+            }
+            renderer.render(scene, camera);
+            return;
+        }
         updateEnvironment(dt);
         if (hitStopT > 0) hitStopT = Math.max(0, hitStopT - rawDt);
         if (playerHitStunT > 0) playerHitStunT = Math.max(0, playerHitStunT - rawDt);
         if (rollCooldownT > 0) rollCooldownT = Math.max(0, rollCooldownT - rawDt);
-        const gp = navigator.getGamepads()[0];
         let moveInput = new THREE.Vector3();
 
         // Input
