@@ -18,7 +18,7 @@ import {
 } from './constants.js';
 import { ATTACK1_DEBUG_TOGGLE_KEY } from '../config/debugFlags.js';
 import { renderAttack1DebugOverlay } from '../debug/debugOverlay.js';
-import { createEchoStalker, updateEnemy } from '../enemy/echoStalker.js';
+import { createEchoStalker, disposeEchoStalker, updateEnemy } from '../enemy/echoStalker.js';
 import { createInput } from '../input/input.js';
 import {
     applyAttack1Pose,
@@ -55,6 +55,21 @@ import { applySceneFog, setupEnvironment, updateEnvironment } from '../scene/env
 import { setupLighting } from '../scene/lighting.js';
 import { easeInOutCubic } from '../utils/easing.js';
 
+function createHeartGeometry() {
+    const heartShape = new THREE.Shape();
+    heartShape.moveTo(0, 0.35);
+    heartShape.bezierCurveTo(0, 0.35, -0.45, -0.15, -0.9, -0.6);
+    heartShape.bezierCurveTo(-1.35, -1.02, -1.32, -1.72, -0.85, -2.05);
+    heartShape.bezierCurveTo(-0.42, -2.35, 0.02, -2.12, 0.25, -1.78);
+    heartShape.bezierCurveTo(0.48, -2.12, 0.92, -2.35, 1.35, -2.05);
+    heartShape.bezierCurveTo(1.82, -1.72, 1.85, -1.02, 1.4, -0.6);
+    heartShape.bezierCurveTo(0.95, -0.15, 0.5, 0.35, 0.5, 0.35);
+    const heartGeometry = new THREE.ShapeGeometry(heartShape, 24);
+    heartGeometry.center();
+    heartGeometry.rotateZ(Math.PI);
+    return heartGeometry;
+}
+
 export function createGame({ runtime, dom }) {
     const comboTag = dom.comboTag;
     const snapFill = dom.snapFill;
@@ -69,6 +84,13 @@ export function createGame({ runtime, dom }) {
     const lookTarget = new THREE.Vector3(0, 2, 0);
     const desiredLookTarget = new THREE.Vector3();
     const renderer = runtime.renderer;
+    const HEART_SPAWN_INTERVAL = 15;
+    const HEART_SPAWN_RADIUS = 14.5;
+    const HEART_PICKUP_RADIUS = 1.35;
+    const HEART_MIN_PLAYER_DISTANCE = 4.5;
+    const HEART_MIN_ENEMY_DISTANCE = 2.75;
+    const HEART_MIN_HEART_SPACING = 2.25;
+    const HEART_HEAL_AMOUNT = PLAYER_MAX_HP * 0.25;
     applySceneFog(scene);
     const { pLight } = setupLighting(scene);
     setupEnvironment(scene);
@@ -134,9 +156,10 @@ export function createGame({ runtime, dom }) {
     scene.add(trailMesh);
     const trailPoints = [];
 
-    // --- TEST ENEMY: ECHO-STALKER ---
-    const echoStalker = createEchoStalker({ scene });
-    const { enemy, enemyPivot, enemyCore, enemyHpRoot, enemyHpFill } = echoStalker;
+    // --- TEST ENEMIES: ECHO-STALKERS ---
+    const enemies = [];
+    const heartPickups = [];
+    let heartSpawnT = HEART_SPAWN_INTERVAL;
 
     const hitBurst = new THREE.Mesh(
         new THREE.RingGeometry(0.18, 0.55, 24),
@@ -204,6 +227,8 @@ export function createGame({ runtime, dom }) {
     const attack2WeaponReturnRot = new THREE.Vector3();
     const attackToEnemy = new THREE.Vector3();
     const attackRight = new THREE.Vector3();
+    let currentWaveSize = 1;
+    let pendingWaveSize = 0;
     const playerRig = {
         body,
         eyeL,
@@ -269,7 +294,6 @@ export function createGame({ runtime, dom }) {
         getWeaponParentLabel: () => getWeaponParentLabel(playerProceduralContext)
     };
     let attack1DebugEnabled = false;
-    const enemyKnockback = new THREE.Vector3();
     const playerKnockback = new THREE.Vector3();
     const rollDirection = new THREE.Vector3(0, 0, 1);
     const playerForward = new THREE.Vector3(0, 0, 1);
@@ -316,11 +340,189 @@ export function createGame({ runtime, dom }) {
         return 0;
     }
 
-    function updateEnemyHealthBar() {
+    function createEnemySpawnOrigin() {
+        return new THREE.Vector3(playerPivot.position.x, 0, playerPivot.position.z);
+    }
+
+    function getActiveEnemies() {
+        return enemies.filter(({ enemy, enemyPivot }) => enemyPivot.visible && enemy.state !== 'dead');
+    }
+
+    function updateEnemyHealthBar(echoStalker) {
+        const { enemy, enemyHpFill } = echoStalker;
         const ratio = THREE.MathUtils.clamp(enemy.health / enemy.maxHealth, 0, 1);
         enemyHpFill.scale.x = ratio;
         enemyHpFill.position.x = -0.85 + 0.85 * ratio;
         enemyHpFill.material.color.set(ratio > 0.5 ? 0xff627f : 0xff3b5c);
+    }
+
+    function spawnEnemy({ angle, radius } = {}) {
+        const echoStalker = createEchoStalker({
+            scene,
+            spawnOrigin: createEnemySpawnOrigin(),
+            spawnAngle: angle,
+            spawnRadius: radius
+        });
+        updateEnemyHealthBar(echoStalker);
+        enemies.push(echoStalker);
+        return echoStalker;
+    }
+
+    function spawnEnemyBurst(count) {
+        const baseAngle = Math.random() * Math.PI * 2;
+        for (let i = 0; i < count; i += 1) {
+            const angle = baseAngle + (i / Math.max(1, count)) * Math.PI * 2;
+            const radius = 7.2 + (i % 3) * 1.15 + Math.random() * 0.55;
+            spawnEnemy({ angle, radius });
+        }
+    }
+
+    function createHeartPickup(position) {
+        const root = new THREE.Group();
+        root.position.copy(position);
+        scene.add(root);
+
+        const shadow = new THREE.Mesh(
+            new THREE.CircleGeometry(0.52, 24),
+            new THREE.MeshBasicMaterial({ color: 0x1b0a12, transparent: true, opacity: 0.24, depthWrite: false })
+        );
+        shadow.rotation.x = -Math.PI / 2;
+        shadow.position.y = 0.04;
+        root.add(shadow);
+
+        const glow = new THREE.Mesh(
+            new THREE.RingGeometry(0.34, 0.64, 24),
+            new THREE.MeshBasicMaterial({
+                color: 0xff9cb7,
+                transparent: true,
+                opacity: 0.46,
+                side: THREE.DoubleSide,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            })
+        );
+        glow.position.y = 1.08;
+        root.add(glow);
+
+        const icon = new THREE.Mesh(
+            createHeartGeometry(),
+            new THREE.MeshBasicMaterial({
+                color: 0xff5f86,
+                transparent: true,
+                opacity: 0.96,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            })
+        );
+        icon.position.y = 1.08;
+        icon.scale.setScalar(0.34);
+        root.add(icon);
+
+        return {
+            root,
+            shadow,
+            glow,
+            icon,
+            bobOffset: Math.random() * Math.PI * 2
+        };
+    }
+
+    function disposeHeartPickup(heartPickup) {
+        const { root, shadow, glow, icon } = heartPickup;
+        root.parent?.remove(root);
+        shadow.geometry.dispose();
+        shadow.material.dispose();
+        glow.geometry.dispose();
+        glow.material.dispose();
+        icon.geometry.dispose();
+        icon.material.dispose();
+    }
+
+    function findHeartSpawnPosition() {
+        const heartSpawnPosition = new THREE.Vector3();
+        for (let attempt = 0; attempt < 18; attempt += 1) {
+            const angle = Math.random() * Math.PI * 2;
+            const radius = Math.sqrt(Math.random()) * HEART_SPAWN_RADIUS;
+            heartSpawnPosition.set(Math.cos(angle) * radius, 0, Math.sin(angle) * radius);
+
+            if (heartSpawnPosition.distanceToSquared(playerPivot.position) < HEART_MIN_PLAYER_DISTANCE * HEART_MIN_PLAYER_DISTANCE) {
+                continue;
+            }
+
+            if (heartPickups.some(({ root }) => root.position.distanceToSquared(heartSpawnPosition) < HEART_MIN_HEART_SPACING * HEART_MIN_HEART_SPACING)) {
+                continue;
+            }
+
+            if (getActiveEnemies().some(({ enemyPivot }) => enemyPivot.position.distanceToSquared(heartSpawnPosition) < HEART_MIN_ENEMY_DISTANCE * HEART_MIN_ENEMY_DISTANCE)) {
+                continue;
+            }
+
+            return heartSpawnPosition.clone();
+        }
+
+        return heartSpawnPosition.set(0, 0, 0);
+    }
+
+    function spawnHeartPickup() {
+        heartPickups.push(createHeartPickup(findHeartSpawnPosition()));
+    }
+
+    function collectHeartPickup(index) {
+        const heartPickup = heartPickups[index];
+        setPlayerHp(playerHp + HEART_HEAL_AMOUNT);
+        disposeHeartPickup(heartPickup);
+        heartPickups.splice(index, 1);
+    }
+
+    function updateHeartPickups(elapsedTime, delta) {
+        heartSpawnT -= delta;
+        while (heartSpawnT <= 0) {
+            spawnHeartPickup();
+            heartSpawnT += HEART_SPAWN_INTERVAL;
+        }
+
+        const canHeal = playerHp < PLAYER_MAX_HP;
+        for (let i = heartPickups.length - 1; i >= 0; i -= 1) {
+            const heartPickup = heartPickups[i];
+            const bob = 1.08 + Math.sin(elapsedTime * 2.8 + heartPickup.bobOffset) * 0.16;
+            const spin = elapsedTime * 0.7 + heartPickup.bobOffset;
+            heartPickup.icon.position.y = bob;
+            heartPickup.glow.position.y = bob;
+            heartPickup.shadow.scale.setScalar(0.92 + Math.sin(elapsedTime * 2.8 + heartPickup.bobOffset) * 0.05);
+
+            heartPickup.icon.quaternion.copy(camera.quaternion);
+            heartPickup.icon.rotateZ(Math.sin(elapsedTime * 1.9 + heartPickup.bobOffset) * 0.14);
+            heartPickup.glow.quaternion.copy(camera.quaternion);
+            heartPickup.glow.rotateZ(spin);
+
+            if (!canHeal) continue;
+
+            const dx = heartPickup.root.position.x - playerPivot.position.x;
+            const dz = heartPickup.root.position.z - playerPivot.position.z;
+            if ((dx * dx) + (dz * dz) <= HEART_PICKUP_RADIUS * HEART_PICKUP_RADIUS) {
+                collectHeartPickup(i);
+            }
+        }
+    }
+
+    function cleanupDeadEnemies() {
+        for (let i = enemies.length - 1; i >= 0; i -= 1) {
+            if (enemies[i].enemyPivot.visible) continue;
+            disposeEchoStalker(enemies[i]);
+            enemies.splice(i, 1);
+        }
+    }
+
+    function queueNextWave() {
+        if (pendingWaveSize > 0) return;
+        pendingWaveSize = currentWaveSize * 2;
+    }
+
+    function maybeStartNextWave() {
+        if (pendingWaveSize === 0 || enemies.length > 0) return;
+        currentWaveSize = pendingWaveSize;
+        pendingWaveSize = 0;
+        spawnEnemyBurst(currentWaveSize);
     }
 
     function resetPendingAttack2() {
@@ -585,16 +787,20 @@ export function createGame({ runtime, dom }) {
         weaponPivot.rotation.z = THREE.MathUtils.lerp(-0.03, -0.16, walkBlend);
     }
 
-    function killEnemy() {
+    function killEnemy(echoStalker) {
+        const { enemy, enemyKnockback } = echoStalker;
+        const activeEnemyCount = getActiveEnemies().length;
         enemy.state = 'dead';
         enemy.deadT = 0.28;
         enemy.hitFlashT = 0.16;
         enemyKnockback.set(0, 0, 0);
-        updateEnemyHealthBar();
+        updateEnemyHealthBar(echoStalker);
         addSnap(10);
+        if (activeEnemyCount === 1) queueNextWave();
     }
 
-    function hitEnemy(attackType, chargeRatio = 0) {
+    function hitEnemy(echoStalker, attackType, chargeRatio = 0) {
+        const { enemy, enemyPivot, enemyCore, enemyKnockback } = echoStalker;
         if (enemy.state === 'dead' || enemy.lastHitAttackId === attackId) return;
         enemyCore.getWorldPosition(enemyCenter);
         const damage = attackType === 'attack1' ? ATTACK_1_CONFIG.damage : getAttack2Damage(chargeRatio);
@@ -612,10 +818,10 @@ export function createGame({ runtime, dom }) {
         if (attackType === 'attack2') {
             enemyPivot.position.addScaledVector(attackIntent, 0.08 + 0.16 * chargeRatio);
         }
-        updateEnemyHealthBar();
+        updateEnemyHealthBar(echoStalker);
 
         if (enemy.health <= 0) {
-            killEnemy();
+            killEnemy(echoStalker);
             return;
         }
 
@@ -624,14 +830,16 @@ export function createGame({ runtime, dom }) {
         enemy.playerHitThisLunge = false;
     }
 
-    function hitPlayer() {
+    function hitPlayer(sourceEnemy) {
         if (playerHp <= 0 || isRollInvulnerable()) return;
         resetPendingAttack2();
         setPlayerHp(playerHp - 1);
         playerFlashT = 0.28;
         damageTintT = 0.1;
         playerHitStunT = 0.16;
-        playerKnockback.copy(enemy.lungeDir).multiplyScalar(8.5);
+        if (sourceEnemy) {
+            playerKnockback.copy(sourceEnemy.lungeDir).multiplyScalar(8.5);
+        }
         if (playerHp <= 0) {
             comboTag.innerText = 'DOWN';
             isAttacking = false;
@@ -650,8 +858,8 @@ export function createGame({ runtime, dom }) {
 
     setPlayerHp(PLAYER_MAX_HP);
     setSnapMeter(0);
-    updateEnemyHealthBar();
     resetWeaponToIdle();
+    spawnEnemyBurst(currentWaveSize);
 
     function updateTrail() {
         const tPos = new THREE.Vector3(); tip.getWorldPosition(tPos);
@@ -806,14 +1014,18 @@ export function createGame({ runtime, dom }) {
             }
         }
 
-        updateEnemy({
-            echoStalker,
-            dt,
-            elapsedTime: clock.elapsedTime,
-            playerPivot,
-            enemyKnockback,
-            hitPlayer
-        });
+        for (const echoStalker of enemies) {
+            updateEnemy({
+                echoStalker,
+                dt,
+                elapsedTime: clock.elapsedTime,
+                playerPivot,
+                enemyKnockback: echoStalker.enemyKnockback,
+                hitPlayer: () => hitPlayer(echoStalker.enemy)
+            });
+        }
+        cleanupDeadEnemies();
+        maybeStartNextWave();
 
         // --- ANIMATION ENGINE ---
         if (isAttacking) {
@@ -867,32 +1079,49 @@ export function createGame({ runtime, dom }) {
             }
 
             const shouldEvaluateHit = shouldEvaluateAttackHit(currentAttackType, attackWindowT, previousAttackT, attackChargeRatio);
-            if (enemy.state !== 'dead' && enemyPivot.visible && shouldEvaluateHit) {
-                enemyCore.getWorldPosition(enemyCenter);
+            if (shouldEvaluateHit && !attackHitConnected) {
                 base.getWorldPosition(attackBasePos);
                 tip.getWorldPosition(attackTipPos);
-                const hitDistance = pointToSegmentDistanceXZ(enemyCenter, attackBasePos, attackTipPos);
                 const swingMidY = (attackBasePos.y + attackTipPos.y) * 0.5;
-                const verticalDelta = Math.abs(enemyCenter.y - swingMidY);
-                let passesHit = false;
+                let bestTarget = null;
+                let bestHitDistance = Infinity;
+                let bestTargetDistanceSq = Infinity;
 
-                if (currentAttackType === 'attack1') {
-                    passesHit = hitDistance < ATTACK_1_CONFIG.hitRange && verticalDelta < 1.0;
-                } else {
-                    attackToEnemy.subVectors(enemyCenter, playerPivot.position).setY(0);
-                    attackRight.set(attackIntent.z, 0, -attackIntent.x);
-                    const forwardDistance = attackToEnemy.dot(attackIntent);
-                    const lateralDistance = Math.abs(attackToEnemy.dot(attackRight));
-                    passesHit =
-                        hitDistance < getAttack2HitRange(attackChargeRatio)
-                        && verticalDelta < ATTACK_2_CONFIG.verticalRange
-                        && forwardDistance >= ATTACK_2_CONFIG.minForward + 0.06 * attackChargeRatio
-                        && lateralDistance <= getAttack2MaxLateral(attackChargeRatio);
+                for (const echoStalker of getActiveEnemies()) {
+                    const { enemyCore } = echoStalker;
+                    enemyCore.getWorldPosition(enemyCenter);
+                    const hitDistance = pointToSegmentDistanceXZ(enemyCenter, attackBasePos, attackTipPos);
+                    const verticalDelta = Math.abs(enemyCenter.y - swingMidY);
+                    let passesHit = false;
+
+                    if (currentAttackType === 'attack1') {
+                        passesHit = hitDistance < ATTACK_1_CONFIG.hitRange && verticalDelta < 1.0;
+                    } else {
+                        attackToEnemy.subVectors(enemyCenter, playerPivot.position).setY(0);
+                        attackRight.set(attackIntent.z, 0, -attackIntent.x);
+                        const forwardDistance = attackToEnemy.dot(attackIntent);
+                        const lateralDistance = Math.abs(attackToEnemy.dot(attackRight));
+                        passesHit =
+                            hitDistance < getAttack2HitRange(attackChargeRatio)
+                            && verticalDelta < ATTACK_2_CONFIG.verticalRange
+                            && forwardDistance >= ATTACK_2_CONFIG.minForward + 0.06 * attackChargeRatio
+                            && lateralDistance <= getAttack2MaxLateral(attackChargeRatio);
+                    }
+
+                    if (passesHit) {
+                        const targetDistanceSq = enemyCenter.distanceToSquared(playerPivot.position);
+                        if (
+                            hitDistance < bestHitDistance
+                            || (hitDistance === bestHitDistance && targetDistanceSq < bestTargetDistanceSq)
+                        ) {
+                            bestTarget = echoStalker;
+                            bestHitDistance = hitDistance;
+                            bestTargetDistanceSq = targetDistanceSq;
+                        }
+                    }
                 }
 
-                if (passesHit) {
-                    hitEnemy(currentAttackType, attackChargeRatio);
-                }
+                if (bestTarget) hitEnemy(bestTarget, currentAttackType, attackChargeRatio);
             }
 
             previousAttackT = attackWindowT;
@@ -980,9 +1209,12 @@ export function createGame({ runtime, dom }) {
         }
         lookTarget.lerp(desiredLookTarget, 0.1);
         camera.lookAt(lookTarget);
+        updateHeartPickups(clock.elapsedTime, rawDt);
 
-        enemyHpRoot.visible = enemyPivot.visible && enemy.state !== 'dead';
-        if (enemyHpRoot.visible) {
+        for (const echoStalker of enemies) {
+            const { enemy, enemyPivot, enemyHpRoot } = echoStalker;
+            enemyHpRoot.visible = enemyPivot.visible && enemy.state !== 'dead';
+            if (!enemyHpRoot.visible) continue;
             enemyHpRoot.position.copy(enemyPivot.position);
             enemyHpRoot.position.y += 3.05;
             enemyHpRoot.quaternion.copy(camera.quaternion);

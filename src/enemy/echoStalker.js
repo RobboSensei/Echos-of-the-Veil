@@ -13,10 +13,19 @@ function startEnemyRecovery(enemy) {
     enemy.playerHitThisLunge = false;
 }
 
-export function createEchoStalker({ scene }) {
+export function createEchoStalker({
+    scene,
+    spawnOrigin = new THREE.Vector3(),
+    spawnAngle = Math.atan2(2.5, 8.5),
+    spawnRadius = Math.sqrt((8.5 * 8.5) + (2.5 * 2.5))
+}) {
     const enemyPivot = new THREE.Group();
     scene.add(enemyPivot);
-    enemyPivot.position.set(8.5, 0, 2.5);
+    enemyPivot.position.set(
+        spawnOrigin.x + Math.cos(spawnAngle) * spawnRadius,
+        0,
+        spawnOrigin.z + Math.sin(spawnAngle) * spawnRadius
+    );
 
     const enemyShadow = new THREE.Mesh(
         new THREE.CircleGeometry(0.8, 32),
@@ -68,8 +77,8 @@ export function createEchoStalker({ scene }) {
 
     const enemy = {
         state: 'orbit',
-        angle: Math.atan2(enemyPivot.position.z, enemyPivot.position.x),
-        radius: 8.4,
+        angle: spawnAngle,
+        radius: spawnRadius,
         attackCooldown: 2.2,
         telegraphT: 0,
         lungeT: 0,
@@ -97,10 +106,38 @@ export function createEchoStalker({ scene }) {
         enemyHpRoot,
         enemyHpBg,
         enemyHpFill,
+        enemyKnockback: new THREE.Vector3(),
         enemyTargetPos: new THREE.Vector3(),
         enemyLookTarget: new THREE.Vector3(),
         scratchZero: new THREE.Vector3()
     };
+}
+
+export function disposeEchoStalker(echoStalker) {
+    const {
+        enemyPivot,
+        enemyShadow,
+        enemyCore,
+        enemyHalo,
+        enemyMat,
+        enemyHpRoot,
+        enemyHpBg,
+        enemyHpFill
+    } = echoStalker;
+
+    enemyPivot.parent?.remove(enemyPivot);
+    enemyHpRoot.parent?.remove(enemyHpRoot);
+
+    enemyShadow.geometry.dispose();
+    enemyShadow.material.dispose();
+    enemyCore.geometry.dispose();
+    enemyMat.dispose();
+    enemyHalo.geometry.dispose();
+    enemyHalo.material.dispose();
+    enemyHpBg.geometry.dispose();
+    enemyHpBg.material.dispose();
+    enemyHpFill.geometry.dispose();
+    enemyHpFill.material.dispose();
 }
 
 export function updateEnemy({ echoStalker, dt, elapsedTime, playerPivot, enemyKnockback, hitPlayer }) {
