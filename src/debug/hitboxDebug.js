@@ -1,4 +1,9 @@
 import * as THREE from 'three';
+import {
+    ENEMY_HURTBOX_HEIGHT,
+    ENEMY_HURTBOX_RADIUS,
+    PLAYER_HURTBOX_RADIUS
+} from '../core/constants.js';
 
 function disposeObjectTree(root) {
     root.traverse(object => {
@@ -19,21 +24,22 @@ export function createPlayerHitboxDebug({ playerPivot }) {
     root.visible = false;
     playerPivot.add(root);
 
-    const volume = new THREE.Mesh(
-        new THREE.CylinderGeometry(1.55, 1.55, 2.2, 24, 1, true),
+    const centerMarker = new THREE.Mesh(
+        new THREE.CircleGeometry(0.14, 20),
         new THREE.MeshBasicMaterial({
             color: 0x34f2ff,
-            wireframe: true,
             transparent: true,
-            opacity: 0.42,
+            opacity: 0.82,
+            side: THREE.DoubleSide,
             depthWrite: false
         })
     );
-    volume.position.y = 1.1;
-    root.add(volume);
+    centerMarker.rotation.x = -Math.PI / 2;
+    centerMarker.position.y = 0.04;
+    root.add(centerMarker);
 
     const floorRing = new THREE.Mesh(
-        new THREE.RingGeometry(1.42, 1.55, 36),
+        new THREE.RingGeometry(PLAYER_HURTBOX_RADIUS - 0.05, PLAYER_HURTBOX_RADIUS, 48),
         new THREE.MeshBasicMaterial({
             color: 0x78fbff,
             transparent: true,
@@ -60,7 +66,7 @@ export function createEnemyHitboxDebug({ enemyPivot }) {
     enemyPivot.add(root);
 
     const volume = new THREE.Mesh(
-        new THREE.SphereGeometry(1.05, 14, 12),
+        new THREE.CylinderGeometry(ENEMY_HURTBOX_RADIUS, ENEMY_HURTBOX_RADIUS, ENEMY_HURTBOX_HEIGHT * 2, 18, 1, true),
         new THREE.MeshBasicMaterial({
             color: 0xff7aa7,
             wireframe: true,
@@ -72,8 +78,8 @@ export function createEnemyHitboxDebug({ enemyPivot }) {
     volume.position.y = 0.95;
     root.add(volume);
 
-    const floorRing = new THREE.Mesh(
-        new THREE.RingGeometry(0.9, 1.02, 28),
+    const floorProjection = new THREE.Mesh(
+        new THREE.RingGeometry(ENEMY_HURTBOX_RADIUS - 0.05, ENEMY_HURTBOX_RADIUS, 24),
         new THREE.MeshBasicMaterial({
             color: 0xff9ec0,
             transparent: true,
@@ -82,9 +88,21 @@ export function createEnemyHitboxDebug({ enemyPivot }) {
             depthWrite: false
         })
     );
-    floorRing.rotation.x = -Math.PI / 2;
-    floorRing.position.y = 0.04;
-    root.add(floorRing);
+    floorProjection.rotation.x = -Math.PI / 2;
+    floorProjection.position.y = 0.04;
+    root.add(floorProjection);
+
+    const centerMarker = new THREE.Mesh(
+        new THREE.SphereGeometry(0.12, 10, 10),
+        new THREE.MeshBasicMaterial({
+            color: 0xff9ec0,
+            transparent: true,
+            opacity: 0.9,
+            depthWrite: false
+        })
+    );
+    centerMarker.position.y = 0.95;
+    root.add(centerMarker);
 
     return {
         root,

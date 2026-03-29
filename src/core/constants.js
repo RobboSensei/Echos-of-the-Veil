@@ -12,6 +12,8 @@ export const ATTACK_1_CONFIG = {
     trailOpacity: 0.58
 };
 
+export const ATTACK_1_VERTICAL_RANGE = 1.0;
+
 export const ATTACK_2_CONFIG = {
     holdThreshold: 0.15,
     maxChargeTime: 0.24,
@@ -50,6 +52,9 @@ export const ATTACK_1_BRIDGE_BLEND_TIME = 0.09;
 export const ATTACK_1_BRIDGE_START_PROGRESS = 0.14;
 
 export const PLAYER_MAX_HP = 5;
+export const PLAYER_HURTBOX_RADIUS = 1.55;
+export const ENEMY_HURTBOX_RADIUS = 0.5;
+export const ENEMY_HURTBOX_HEIGHT = 0.5;
 
 export const ROLL_DURATION = 0.36;
 export const ROLL_COOLDOWN = 0.7;

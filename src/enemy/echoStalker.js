@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import {
+    PLAYER_HURTBOX_RADIUS,
     enemyBaseColor,
     enemyHitColor,
     enemyLungeColor,
@@ -190,7 +191,7 @@ export function updateEnemy({ echoStalker, dt, elapsedTime, playerPivot, enemyKn
         enemyPivot.position.addScaledVector(enemy.lungeDir, 23 * dt);
         enemy.lungeT -= dt;
 
-        if (!enemy.playerHitThisLunge && enemyPivot.position.distanceTo(playerPivot.position) < 1.55) {
+        if (!enemy.playerHitThisLunge && enemyPivot.position.distanceTo(playerPivot.position) < PLAYER_HURTBOX_RADIUS) {
             enemy.playerHitThisLunge = true;
             hitPlayer();
         }

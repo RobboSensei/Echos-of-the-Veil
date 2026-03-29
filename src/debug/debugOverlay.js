@@ -10,7 +10,7 @@ note: raw rig left/right names are inverted
 rawMap: leftHand->anatomicalRightHand | rightHand->anatomicalLeftHand
 rawMap: leftFoot->anatomicalRightFoot | rightFoot->anatomicalLeftFoot
 colors: anatomicalLeftHand blue | anatomicalRightHand red | anatomicalLeftFoot green | anatomicalRightFoot yellow
-hitboxes: player cyan | enemy pink
+hitboxes: player cyan ring is exact | enemy pink cylinder is exact
 weaponParent: ${debugState.weaponParent || 'n/a'}
 strikeHand: ${debugState.strikeHand || 'n/a'}
 counterHand: ${debugState.counterHand || 'n/a'}

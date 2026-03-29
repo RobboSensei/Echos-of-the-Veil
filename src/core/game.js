@@ -4,8 +4,11 @@ import {
     ATTACK_1_BRIDGE_START_PROGRESS,
     ATTACK_1_CONFIG,
     ATTACK_1_END_T,
+    ATTACK_1_VERTICAL_RANGE,
     ATTACK_2_CONFIG,
     ATTACK_BUFFER,
+    ENEMY_HURTBOX_HEIGHT,
+    ENEMY_HURTBOX_RADIUS,
     PLAYER_MAX_HP,
     ROLL_BUFFER_WINDOW,
     ROLL_COOLDOWN,
@@ -1184,17 +1187,19 @@ export function createGame({ runtime, dom }) {
                     let passesHit = false;
 
                     if (currentAttackType === 'attack1') {
-                        passesHit = hitDistance < ATTACK_1_CONFIG.hitRange && verticalDelta < 1.0;
+                        passesHit =
+                            hitDistance < ATTACK_1_CONFIG.hitRange + ENEMY_HURTBOX_RADIUS
+                            && verticalDelta < ATTACK_1_VERTICAL_RANGE + ENEMY_HURTBOX_HEIGHT;
                     } else {
                         attackToEnemy.subVectors(enemyCenter, playerPivot.position).setY(0);
                         attackRight.set(attackIntent.z, 0, -attackIntent.x);
                         const forwardDistance = attackToEnemy.dot(attackIntent);
                         const lateralDistance = Math.abs(attackToEnemy.dot(attackRight));
                         passesHit =
-                            hitDistance < getAttack2HitRange(attackChargeRatio)
-                            && verticalDelta < ATTACK_2_CONFIG.verticalRange
-                            && forwardDistance >= ATTACK_2_CONFIG.minForward + 0.06 * attackChargeRatio
-                            && lateralDistance <= getAttack2MaxLateral(attackChargeRatio);
+                            hitDistance < getAttack2HitRange(attackChargeRatio) + ENEMY_HURTBOX_RADIUS
+                            && verticalDelta < ATTACK_2_CONFIG.verticalRange + ENEMY_HURTBOX_HEIGHT
+                            && forwardDistance >= (ATTACK_2_CONFIG.minForward + 0.06 * attackChargeRatio) - ENEMY_HURTBOX_RADIUS
+                            && lateralDistance <= getAttack2MaxLateral(attackChargeRatio) + ENEMY_HURTBOX_RADIUS;
                     }
 
                     if (passesHit) {
