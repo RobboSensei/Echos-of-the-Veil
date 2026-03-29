@@ -18,6 +18,7 @@ import {
 } from './constants.js';
 import { ATTACK1_DEBUG_TOGGLE_KEY } from '../config/debugFlags.js';
 import { renderAttack1DebugOverlay } from '../debug/debugOverlay.js';
+import { createEnemyHitboxDebug, createPlayerHitboxDebug } from '../debug/hitboxDebug.js';
 import { createEchoStalker, disposeEchoStalker, updateEnemy } from '../enemy/echoStalker.js';
 import { createInput } from '../input/input.js';
 import {
@@ -135,6 +136,7 @@ export function createGame({ runtime, dom }) {
         ANATOMICAL_LEFT_FOOT_HOME,
         ANATOMICAL_RIGHT_FOOT_HOME
     } = createPlayer({ scene });
+    const playerHitboxDebug = createPlayerHitboxDebug({ playerPivot });
 
     // --- STABLE TRAIL SYSTEM (NOW WITH SMOOTH GRADIENT) ---
     const trailMax = 22;
@@ -370,6 +372,7 @@ export function createGame({ runtime, dom }) {
             spawnAngle: angle,
             spawnRadius: radius
         });
+        echoStalker.debugHitbox = createEnemyHitboxDebug({ enemyPivot: echoStalker.enemyPivot });
         updateEnemyHealthBar(echoStalker);
         enemies.push(echoStalker);
         return echoStalker;
@@ -515,6 +518,7 @@ export function createGame({ runtime, dom }) {
     function cleanupDeadEnemies() {
         for (let i = enemies.length - 1; i >= 0; i -= 1) {
             if (enemies[i].enemyPivot.visible) continue;
+            enemies[i].debugHitbox?.dispose();
             disposeEchoStalker(enemies[i]);
             enemies.splice(i, 1);
         }
@@ -1273,11 +1277,16 @@ export function createGame({ runtime, dom }) {
             hitBurst.visible = false;
         }
 
-        const showAttack1Debug = attack1DebugEnabled && attack1DebugState.active;
+        const showAttack1Debug = attack1DebugEnabled;
         anatomicalLeftHandDebugMarker.visible = showAttack1Debug;
         anatomicalRightHandDebugMarker.visible = showAttack1Debug;
         anatomicalLeftFootDebugMarker.visible = showAttack1Debug;
         anatomicalRightFootDebugMarker.visible = showAttack1Debug;
+        playerHitboxDebug.root.visible = showAttack1Debug;
+        for (const echoStalker of enemies) {
+            if (!echoStalker.debugHitbox) continue;
+            echoStalker.debugHitbox.root.visible = showAttack1Debug && echoStalker.enemyPivot.visible && echoStalker.enemy.state !== 'dead';
+        }
         renderAttack1DebugOverlay({
             element: attack1DebugEl,
             visible: showAttack1Debug,
